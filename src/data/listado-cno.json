@@ -1,0 +1,14 @@
+[
+  { "codigo": "1211", "ocupacion": "Especialista en logística y cadenas de suministro" },
+  { "codigo": "1212", "ocupacion": "Especialista en operaciones logísticas" },
+  { "codigo": "1213", "ocupacion": "Analista de crédito y cobranzas" },
+  { "codigo": "1214", "ocupacion": "Líder de ventas y precios" },
+  { "codigo": "1215", "ocupacion": "Gerente de sucursal" },
+  { "codigo": "1216", "ocupacion": "Analista administrativo" },
+  { "codigo": "2281", "ocupacion": "Soporte técnico y sistemas" },
+  { "codigo": "2282", "ocupacion": "Desarrollador junior de software" },
+  { "codigo": "1311", "ocupacion": "Auxiliar de contabilidad" },
+  { "codigo": "1312", "ocupacion": "Auxiliar de nómina y prestaciones" },
+  { "codigo": "4131", "ocupacion": "Auxiliar de almacén y bodega" },
+  { "codigo": "4132", "ocupacion": "Operador logístico" }
+]
