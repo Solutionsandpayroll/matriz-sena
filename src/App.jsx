@@ -55,37 +55,24 @@ function normalizar(texto) {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
-// Traduce una lista de cargos EN -> ES usando el modelo. Devuelve { CARGO_EN: "cargo es" }
+// Traduce una lista de cargos EN -> ES usando el modelo, a través de nuestro
+// servidor proxy local (server.js en localhost:3001), que es quien realmente
+// llama a la API de Anthropic con la API key guardada en su .env.
+// Esto evita exponer la API key en el navegador y evita el error de CORS que
+// ocurre si se llama a api.anthropic.com directamente desde el frontend.
 async function traducirCargosConIA(cargosUnicos) {
-  const prompt = `Traduce estos nombres de cargos de trabajo del inglés al español, de forma corta y natural (como se usaría en una nómina colombiana). Responde SOLO un JSON válido, sin texto adicional, con este formato exacto:
-{"CARGO EN INGLES": "cargo en español", ...}
-
-Cargos:
-${cargosUnicos.join("\n")}`;
-
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("http://localhost:3001/api/traducir-cargos", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
-      messages: [{ role: "user", content: prompt }],
-    }),
+    body: JSON.stringify({ cargosUnicos }),
   });
 
-  const data = await response.json();
-  const texto = (data.content || [])
-    .map((b) => b.text || "")
-    .join("")
-    .replace(/```json|```/g, "")
-    .trim();
-
-  try {
-    return JSON.parse(texto);
-  } catch (e) {
-    console.warn("No se pudo parsear la traducción de la IA:", texto);
-    return {};
+  if (!response.ok) {
+    throw new Error("Error al traducir cargos");
   }
+
+  const data = await response.json();
+  return data.traducciones || {};
 }
 
 function obtenerSugerenciasCNO(cargoIngles, traduccionesIA) {
@@ -412,7 +399,9 @@ export default function App() {
     return Object.values(grupos);
   };
 
-  const construirHojaMes = (wb, etiquetaMes, resultado, cnoDelMes, incluirEncabezadoEmpresa) => {
+  // logoId: id de imagen retornado por wb.addImage(), o null/undefined si no aplica.
+  // Cuando se pasa, se inserta en la esquina superior derecha de la hoja.
+  const construirHojaMes = (wb, etiquetaMes, resultado, cnoDelMes, incluirEncabezadoEmpresa, logoId) => {
     const GRIS_ENCABEZADO = "FFD9D9D9";
     const bordeNegro = {
       top: { style: "thin", color: { argb: "FF000000" } },
@@ -425,6 +414,17 @@ export default function App() {
     const nombreHoja = `MATRIZ ${etiquetaMes}`.slice(0, 31);
     const ws = wb.addWorksheet(nombreHoja, { views: [{ showGridLines: true }] });
     ws.columns = [{ width: 32 }, { width: 35 }, { width: 35 }, { width: 32 }];
+
+    // Insertar el logo del SENA (si se cargó correctamente) en la esquina superior
+    // derecha, sin invadir las columnas de datos. Se ubica "flotando" sobre las
+    // celdas usando coordenadas en EMU relativas para no desplazar filas/columnas.
+    if (logoId !== null && logoId !== undefined) {
+      ws.addImage(logoId, {
+        tl: { col: 4.1, row: 0.1 },
+        ext: { width: 140, height: 50 },
+        editAs: "oneCell",
+      });
+    }
 
     // Encabezado de empresa + periodo + jornada aplicada en TODAS las hojas
     // (antes solo aparecía en la primera hoja del libro).
@@ -612,15 +612,22 @@ export default function App() {
 
     const wb = new ExcelJS.Workbook();
 
+    // Cargamos el logo UNA sola vez al workbook y guardamos su id.
+    // Ese id es lo que se debe pasar a ws.addImage() en cada hoja donde
+    // se quiera insertar — cargar la imagen no la inserta por sí sola.
+    let logoId = null;
     try {
       const base64Logo = await obtenerImagenBase64("/sena-logo.png");
-      wb.addImage({ base64: base64Logo, extension: "png" });
+      logoId = wb.addImage({ base64: base64Logo, extension: "png" });
     } catch (e) {
       console.warn("No se pudo cargar el logo del SENA:", e);
     }
 
     Object.entries(resultadosPorMes).forEach(([etiqueta, resultado], idx) => {
-      construirHojaMes(wb, etiqueta, resultado, cnoSeleccionados[etiqueta] || {}, idx === 0);
+      // Por defecto el logo se inserta solo en la primera hoja (idx === 0).
+      // Si prefieres que salga en TODAS las hojas mensuales, cambia
+      // `idx === 0 ? logoId : null` por simplemente `logoId`.
+      construirHojaMes(wb, etiqueta, resultado, cnoSeleccionados[etiqueta] || {}, idx === 0, idx === 0 ? logoId : null);
     });
 
     construirHojaPlantillaPromedio(wb);
