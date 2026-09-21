@@ -1,6 +1,5 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import * as XLSX from "xlsx";
-import ExcelJS from "exceljs";
 import {
   FileSpreadsheet,
   Upload,
@@ -18,1040 +17,3321 @@ import {
   Check,
   Building2,
   Users,
+  Search,
+  ListChecks,
+  UserRoundCheck,
 } from "lucide-react";
+
 import listadoCnoLocal from "./data/listado-cno.json";
 
-const listadoCno = listadoCnoLocal || [];
+import {
+  NOMBRES_MES,
+  MESES_PERIODO_SENA,
+  claveCargo,
+  formatFecha,
+  jornadaLegalSugerida,
+  calcularProporcionPorFechas,
+  calcularCuotaAprendices,
+  describirNovedad,
+  parsearNomina,
+  parsearSeguridadSocial,
+  indexarListadoCno,
+  sugerirCno,
+  nombreDeCodigo,
+  construirHomologacion,
+  cargarHomologacionGuardada,
+  guardarHomologacion,
+} from "./utils/sena";
 
-// Mapeo manual como respaldo/override
-const mapeoDirectoCno = {
-  "LOGISTICS SPECIALIST I": "2233",
-  "SALESFORCE JUNIOR DEVELOPER": "4131",
-  "LOGISTICS OPERATIONS SPECIALIST AFTER HOURS": "2233",
-  "CREDIT AND COLLECTIONS ANALYST II": "1121",
-  "SALES & PRICING TEAM LEADER": "1121",
-  "BRANCH MANAGER": "0421",
-  "ADMINISTRATIVE ANALYST": "9227",
-  "GERENTE DE CUENTAS JR": "1121",
-  "IT SUPPORT SPECIALIST": "4131",
-};
+import { exportarMatrizExcel } from "./utils/exportarExcel";
 
-// Jornadas semanales legales vigentes en Colombia por rango de fechas (Ley 2101 de 2021).
-// Se usa como sugerencia por defecto según el mes/año del periodo, pero siempre es editable
-// manualmente por si la empresa aplica una jornada distinta (ej. reducción anticipada).
-function jornadaLegalSugerida(anio, mesIndex) {
-  const fecha = new Date(anio, mesIndex, 15); // punto medio del mes
-  if (fecha < new Date(2023, 6, 15)) return 48; // hasta jul 2023
-  if (fecha < new Date(2024, 6, 15)) return 47; // jul 2023 - jul 2024
-  if (fecha < new Date(2025, 6, 15)) return 46; // jul 2024 - jul 2025
-  if (fecha < new Date(2026, 6, 15)) return 44; // jul 2025 - jul 2026
-  return 42; // jul 2026 en adelante
+const INDICE_CNO = indexarListadoCno(listadoCnoLocal || []);
+
+const API_URL =
+  import.meta.env?.VITE_API_URL || "http://localhost:3001";
+
+const JORNADAS = [40, 42, 44, 46, 47, 48];
+
+/* ============================================================
+   UTILIDADES
+   ============================================================ */
+
+function normalizarDocumento(valor) {
+  if (valor === null || valor === undefined) return "";
+
+  return String(valor)
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/\.0$/, "");
 }
 
-function normalizar(texto) {
-  return String(texto || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+function redondearHoras(valor) {
+  const numero = Number(valor);
+
+  if (!Number.isFinite(numero)) return 0;
+
+  return Math.round(numero);
 }
 
-// Traduce una lista de cargos EN -> ES usando el modelo, a través de nuestro
-// servidor proxy local (server.js en localhost:3001), que es quien realmente
-// llama a la API de Anthropic con la API key guardada en su .env.
-// Esto evita exponer la API key en el navegador y evita el error de CORS que
-// ocurre si se llama a api.anthropic.com directamente desde el frontend.
-async function traducirCargosConIA(cargosUnicos) {
-  const response = await fetch("http://localhost:3001/api/traducir-cargos", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cargosUnicos }),
+function obtenerRegistrosSS(ss) {
+  /*
+   * La nueva versión de sena.js debe devolver:
+   *
+   * {
+   *   registros: Map([
+   *      ["documento", {
+   *          documento,
+   *          fechaIngreso,
+   *          fechaRetiro,
+   *          horasLaboradas
+   *      }]
+   *   ]),
+   *   documentos: Set(...)
+   * }
+   *
+   * Dejamos compatibilidad con la estructura anterior.
+   */
+
+  if (ss?.registros instanceof Map) {
+    return ss.registros;
+  }
+
+  if (Array.isArray(ss?.registros)) {
+    const mapa = new Map();
+
+    ss.registros.forEach((r) => {
+      const documento = normalizarDocumento(
+        r.documento ?? r.documentoOriginal
+      );
+
+      if (!documento) return;
+
+      mapa.set(documento, {
+        ...r,
+        documento,
+        horasLaboradas: redondearHoras(
+          r.horasLaboradas ??
+            r.horas ??
+            r.horasPila ??
+            r.horasTrabajadas ??
+            0
+        ),
+      });
+    });
+
+    return mapa;
+  }
+
+  /*
+   * Compatibilidad con una versión que solamente devolvía Set.
+   */
+  if (ss?.documentos instanceof Set) {
+    return new Map(
+      [...ss.documentos].map((documento) => [
+        normalizarDocumento(documento),
+        {
+          documento: normalizarDocumento(documento),
+          fechaIngreso: null,
+          fechaRetiro: null,
+          horasLaboradas: 0,
+        },
+      ])
+    );
+  }
+
+  if (ss instanceof Set) {
+    return new Map(
+      [...ss].map((documento) => [
+        normalizarDocumento(documento),
+        {
+          documento: normalizarDocumento(documento),
+          fechaIngreso: null,
+          fechaRetiro: null,
+          horasLaboradas: 0,
+        },
+      ])
+    );
+  }
+
+  return new Map();
+}
+
+function obtenerRegistroSS(ssRegistros, documento) {
+  if (!ssRegistros) return null;
+
+  return (
+    ssRegistros.get(normalizarDocumento(documento)) || null
+  );
+}
+
+/*
+ * Busca la información de una persona en las nóminas de todos
+ * los meses procesados.
+ */
+function buscarEmpleadoEnOtrosMeses(
+  documento,
+  leidos,
+  mesActualId
+) {
+  const doc = normalizarDocumento(documento);
+
+  for (const item of leidos) {
+    if (item.mes.id === mesActualId) continue;
+
+    const empleado = item.nom.empleados.find(
+      (e) => normalizarDocumento(e.documento) === doc
+    );
+
+    if (empleado) {
+      return empleado;
+    }
+  }
+
+  return null;
+}
+
+/*
+ * Busca el cargo más reciente disponible para una persona.
+ */
+function buscarCargoHistorico(documento, leidos, mesActualId) {
+  const encontrado = buscarEmpleadoEnOtrosMeses(
+    documento,
+    leidos,
+    mesActualId
+  );
+
+  if (!encontrado) return null;
+
+  return {
+    ...encontrado,
+    cargoKey:
+      encontrado.cargoKey ||
+      claveCargo(encontrado.cargo || "(SIN CARGO)"),
+  };
+}
+
+/*
+ * Determina la proporción usando primero las fechas.
+ *
+ * La Seguridad Social también aporta horas laboradas. Por eso
+ * guardamos ambas mediciones y luego avisamos cuando difieren.
+ */
+function calcularProporcionConSS({
+  empleado,
+  registroSS,
+  mes,
+  base,
+}) {
+  const proporcionFechas = calcularProporcionPorFechas(
+    empleado.fechaIngreso,
+    empleado.fechaRetiro,
+    mes.anio,
+    mes.mesIndex,
+    base
+  );
+
+  const horasSS = redondearHoras(
+    registroSS?.horasLaboradas ??
+      registroSS?.horas ??
+      registroSS?.horasPila ??
+      0
+  );
+
+  const jornada = Number(mes.jornadaSemanal) || 40;
+
+  /*
+   * Horas ordinarias aproximadas del mes según jornada.
+   * 4.333 semanas promedio.
+   */
+  const horasOrdinariasMes = Math.round(
+    jornada * 52 / 12
+  );
+
+  const proporcionHoras =
+    horasSS > 0 && horasOrdinariasMes > 0
+      ? Math.min(horasSS / horasOrdinariasMes, 1)
+      : null;
+
+  const diferencia =
+    proporcionHoras !== null
+      ? Math.abs(proporcionFechas - proporcionHoras)
+      : 0;
+
+  return {
+    proporcionFechas,
+    proporcionHoras,
+    horasSS,
+    horasOrdinariasMes,
+    diferencia,
+    hayDiferenciaHoras:
+      proporcionHoras !== null && diferencia > 0.05,
+  };
+}
+
+/*
+ * Genera los seis meses anteriores al periodo de presentación.
+ */
+function generarMeses(
+  mesPresentacion,
+  anioPresentacion,
+  jornadaEmpresa,
+  previos
+) {
+  return Array.from({ length: 6 }, (_, i) => {
+    const d = new Date(
+      anioPresentacion,
+      mesPresentacion - (6 - i),
+      1
+    );
+
+    const anio = d.getFullYear();
+    const mesIndex = d.getMonth();
+
+    const anterior = previos?.[i];
+
+    return {
+      id: i,
+      anio,
+      mesIndex,
+      etiqueta: `${NOMBRES_MES[mesIndex]} ${anio}`,
+
+      /*
+       * Si ya existía un ajuste manual para ese mes,
+       * NO se pierde al cambiar la jornada general.
+       */
+      jornadaSemanal:
+        anterior?.jornadaManual === true
+          ? anterior.jornadaSemanal
+          : jornadaEmpresa === "auto"
+          ? jornadaLegalSugerida(anio, mesIndex)
+          : Number(jornadaEmpresa),
+
+      jornadaManual:
+        anterior?.jornadaManual === true,
+
+      nomina: anterior?.nomina ?? null,
+      segSocial: anterior?.segSocial ?? null,
+    };
   });
+}
+
+/* ============================================================
+   TRADUCCIÓN DE CARGOS
+   ============================================================ */
+
+async function traducirCargosConIA(cargosUnicos) {
+  const response = await fetch(
+    `${API_URL}/api/traducir-cargos`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        cargosUnicos,
+      }),
+    }
+  );
 
   if (!response.ok) {
-    throw new Error("Error al traducir cargos");
+    throw new Error(
+      `El servidor respondió ${response.status}`
+    );
   }
 
   const data = await response.json();
-  return data.traducciones || {};
-}
 
-function obtenerSugerenciasCNO(cargoIngles, traduccionesIA) {
-  const cargoLimpio = String(cargoIngles || "").trim().toUpperCase();
+  const normalizadas = {};
 
-  const codigoFijo = mapeoDirectoCno[cargoLimpio];
-  if (codigoFijo) {
-    const itemEncontrado = listadoCno.find((item) => String(item.codigo) === String(codigoFijo));
-    if (itemEncontrado) {
-      return [{ ...itemEncontrado, puntos: 100 }];
-    }
-  }
-
-  const traduccion = traduccionesIA?.[cargoLimpio] || cargoLimpio;
-  const palabrasBusqueda = normalizar(traduccion).split(/[\s,]+/).filter(Boolean);
-
-  return listadoCno
-    .map((item) => {
-      const ocupacionNorm = normalizar(item.ocupacion);
-      let puntos = 0;
-      for (const palabra of palabrasBusqueda) {
-        if (ocupacionNorm.includes(palabra)) puntos++;
+  Object.entries(data.traducciones || {}).forEach(
+    ([k, v]) => {
+      if (v && String(v).trim()) {
+        normalizadas[claveCargo(k)] = String(v).trim();
       }
-      return { ...item, puntos };
-    })
-    .filter((item) => item.puntos > 0)
-    .sort((a, b) => b.puntos - a.puntos)
-    .slice(0, 5);
+    }
+  );
+
+  return normalizadas;
 }
 
-// Devuelve el nombre del cargo en español: usa la traducción de la IA si existe,
-// y si no, cae de vuelta al texto original en inglés (para no dejar celdas vacías).
-function obtenerCargoTraducido(cargoIngles, traduccionesIA) {
-  const cargoLimpio = String(cargoIngles || "").trim().toUpperCase();
-  const traduccion = traduccionesIA?.[cargoLimpio];
-  return traduccion && traduccion.trim() ? traduccion.trim() : cargoIngles;
-}
+/* ============================================================
+   LECTURA DE EXCEL
+   ============================================================ */
 
-function diasDelMes(anio, mesIndex) {
-  return new Date(anio, mesIndex + 1, 0).getDate();
-}
+async function leerFilas(archivo) {
+  const buffer = await archivo.arrayBuffer();
 
-// Calcula proporción trabajada dentro del mes según fecha de ingreso/retiro
-function calcularProporcionPorFechas(fechaIngreso, fechaRetiro, anio, mesIndex) {
-  const totalDias = diasDelMes(anio, mesIndex);
-  const inicioMes = new Date(anio, mesIndex, 1);
-  const finMes = new Date(anio, mesIndex, totalDias);
+  const libro = XLSX.read(buffer, {
+    type: "array",
+  });
 
-  let inicioReal = inicioMes;
-  let finReal = finMes;
+  const hoja =
+    libro.Sheets[libro.SheetNames[0]];
 
-  if (fechaIngreso) {
-    const ingreso = new Date(fechaIngreso);
-    if (!isNaN(ingreso) && ingreso > inicioMes) inicioReal = ingreso;
-  }
-  if (fechaRetiro) {
-    const retiro = new Date(fechaRetiro);
-    if (!isNaN(retiro) && retiro < finMes) finReal = retiro;
-  }
-
-  if (finReal < inicioReal) return 0;
-
-  const diasTrabajados = Math.round((finReal - inicioReal) / (1000 * 60 * 60 * 24)) + 1;
-  return Math.min(diasTrabajados / totalDias, 1);
-}
-
-// Cuota legal de aprendices SENA: 1 aprendiz por cada 20 trabajadores (redondeo hacia abajo).
-function calcularCuotaAprendices(totalTrabajadores) {
-  return Math.floor((totalTrabajadores || 0) / 20);
-}
-
-async function obtenerImagenBase64(url) {
-  const respuesta = await fetch(url);
-  const blob = await respuesta.blob();
-  return new Promise((resolve, reject) => {
-    const lector = new FileReader();
-    lector.onloadend = () => resolve(lector.result);
-    lector.onerror = reject;
-    lector.readAsDataURL(blob);
+  return XLSX.utils.sheet_to_json(hoja, {
+    header: 1,
+    defval: null,
+    raw: true,
   });
 }
 
-function crearMesesVacios() {
-  const anioActual = new Date().getFullYear();
-  return Array.from({ length: 6 }, (_, i) => ({
-    id: i,
-    etiqueta: "",
-    anio: anioActual,
-    mesIndex: 0,
-    jornadaSemanal: jornadaLegalSugerida(anioActual, 0),
-    nomina: null,
-    segSocial: null,
-  }));
-}
+/* ============================================================
+   HOMOLOGACIÓN
+   ============================================================ */
 
-export default function App() {
-  const [nombreEmpresa, setNombreEmpresa] = useState("");
-  const [meses, setMeses] = useState(crearMesesVacios);
-  const [aprendicesActivos, setAprendicesActivos] = useState(0);
-  const [resultadosPorMes, setResultadosPorMes] = useState({});
-  const [cnoSeleccionados, setCnoSeleccionados] = useState({});
-  const [cargando, setCargando] = useState(false);
-  const [traduciendo, setTraduciendo] = useState(false);
-  const [error, setError] = useState(null);
-  const [mostrarInstrucciones, setMostrarInstrucciones] = useState(true);
-  const [mesActivo, setMesActivo] = useState(null);
+function FilaHomologacion({
+  clave,
+  h,
+  cantidad,
+  onCambiar,
+}) {
+  const [abierto, setAbierto] = useState(false);
 
-  const actualizarMes = (id, campo, valor) => {
-    setMeses((prev) =>
-      prev.map((m) => {
-        if (m.id !== id) return m;
-        const actualizado = { ...m, [campo]: valor };
-        // Si cambia el año o el mes, sugerimos la jornada legal vigente para esa fecha,
-        // salvo que el usuario ya la haya ajustado manualmente en esta misma edición.
-        if (campo === "anio" || campo === "mesIndex") {
-          actualizado.jornadaSemanal = jornadaLegalSugerida(actualizado.anio, actualizado.mesIndex);
-        }
-        return actualizado;
-      })
-    );
-  };
+  const [consulta, setConsulta] = useState(
+    h.es || h.original || ""
+  );
 
-  const leerNomina = (buffer) => {
-    const workbook = XLSX.read(buffer, { type: "array" });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const filas = XLSX.utils.sheet_to_json(sheet, { range: 1 });
+  const resultados = useMemo(
+    () =>
+      abierto
+        ? sugerirCno(
+            consulta,
+            INDICE_CNO,
+            25
+          )
+        : [],
+    [abierto, consulta]
+  );
 
-    return filas
-      .filter((fila) => fila["DOCUMENTO IDENTIDAD"])
-      .map((fila) => ({
-        documento: String(fila["DOCUMENTO IDENTIDAD"]).trim(),
-        nombre: fila["NOMBRE COMPLETO"],
-        cargo: String(fila["DESC. OFICIO"] || "").trim(),
-        fechaIngreso: fila["FECHA INGRESO"] || fila["FECHA ANTIGUEDAD"] || null,
-        fechaRetiro: fila["FECHA RETIRO"] || null,
-      }));
-  };
-
-  // Nombres de columna habituales para el número de documento en planillas de
-  // Seguridad Social de distintos operadores (PILA, aportes en línea, etc.)
-  const ALIAS_COLUMNA_DOCUMENTO = ["no id", "numero de identificacion", "numero identificacion", "documento", "cedula", "identificacion", "n° id", "nro id"];
-  const ALIAS_ENCABEZADO_ANCLA = ["no id"];
-
-  const leerSeguridadSocial = (buffer) => {
-    const workbook = XLSX.read(buffer, { type: "array" });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const filas = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
-
-    // 1) Ubicar la fila de encabezado buscando cualquiera de los alias conocidos,
-    //    en vez de asumir siempre el texto exacto "No id".
-    const indiceEncabezado = filas.findIndex(
-      (fila) =>
-        Array.isArray(fila) &&
-        fila.some((celda) => {
-          const norm = normalizar(celda);
-          return ALIAS_ENCABEZADO_ANCLA.some((alias) => norm.includes(alias)) ||
-            ALIAS_COLUMNA_DOCUMENTO.some((alias) => norm === alias);
-        })
-    );
-
-    if (indiceEncabezado === -1) {
-      throw new Error(
-        "No se encontró una columna de identificación reconocible (ej. 'No id', 'Documento', 'Cédula') en la planilla de Seguridad Social."
-      );
-    }
-
-    const filaEncabezado = filas[indiceEncabezado];
-
-    // 2) Determinar dinámicamente en qué columna está el documento, en lugar de
-    //    asumir siempre el índice fijo 7 (esto rompía con formatos distintos).
-    let indiceColumnaDocumento = filaEncabezado.findIndex((celda) => {
-      const norm = normalizar(celda);
-      return ALIAS_COLUMNA_DOCUMENTO.some((alias) => norm.includes(alias));
+  const elegir = (codigo, ocupacion) => {
+    onCambiar(clave, {
+      codigo,
+      ocupacion,
+      confirmado: true,
+      estadoCodigo: codigo
+        ? "encontrado"
+        : "no_calificado",
     });
 
-    if (indiceColumnaDocumento === -1) {
-      throw new Error(
-        "Se encontró el encabezado de la planilla, pero no se pudo identificar la columna del número de documento."
-      );
-    }
-
-    const filasDatos = filas.slice(indiceEncabezado + 1);
-    const documentos = new Set();
-
-    for (const fila of filasDatos) {
-      if (!fila) continue;
-      const documento = fila[indiceColumnaDocumento];
-      if (!documento) continue;
-      documentos.add(String(documento).trim());
-    }
-
-    return documentos;
+    setAbierto(false);
   };
 
-  const traducirCargosDeTodosLosMeses = async () => {
-    setTraduciendo(true);
+  return (
+    <>
+      <tr className="hover:bg-slate-50/80 transition-colors align-top">
+        <td className="py-2.5 px-3 text-slate-400">
+          {h.original}
+        </td>
+
+        <td className="py-2.5 px-3">
+          <input
+            type="text"
+            value={h.es || ""}
+            onChange={(e) =>
+              onCambiar(clave, {
+                es: e.target.value,
+                confirmado: false,
+              })
+            }
+            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-medium text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+          />
+        </td>
+
+        <td className="py-2.5 px-3">
+          {h.codigo ? (
+            <div className="space-y-0.5">
+              <span className="font-mono font-bold text-[#003B7A]">
+                {h.codigo}
+              </span>
+
+              <p className="text-[11px] text-slate-500 leading-snug">
+                {h.ocupacion ||
+                  nombreDeCodigo(
+                    h.codigo,
+                    INDICE_CNO
+                  )}
+              </p>
+            </div>
+          ) : h.estadoCodigo ===
+            "no_calificado" ? (
+            <span className="text-amber-700 font-semibold">
+              No calificado
+            </span>
+          ) : (
+            <span className="text-rose-600 font-semibold">
+              Sin código encontrado
+            </span>
+          )}
+        </td>
+
+        <td className="py-2.5 px-3 text-center font-semibold text-slate-600">
+          {cantidad}
+        </td>
+
+        <td className="py-2.5 px-3">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() =>
+                setAbierto(!abierto)
+              }
+              className="text-[11px] font-bold text-[#003B7A] hover:underline cursor-pointer"
+            >
+              {abierto ? "Cerrar" : "Cambiar"}
+            </button>
+
+            <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={Boolean(h.confirmado)}
+                onChange={(e) =>
+                  onCambiar(clave, {
+                    confirmado:
+                      e.target.checked,
+                  })
+                }
+                className="accent-[#003B7A]"
+              />
+
+              Confirmado
+            </label>
+          </div>
+        </td>
+      </tr>
+
+      {abierto && (
+        <tr className="bg-blue-50/40">
+          <td
+            colSpan={5}
+            className="px-4 py-3"
+          >
+            <div className="space-y-2">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+
+                <input
+                  type="text"
+                  autoFocus
+                  value={consulta}
+                  onChange={(e) =>
+                    setConsulta(e.target.value)
+                  }
+                  placeholder="Busca por cargo en español o por código"
+                  className="w-full bg-white border border-slate-200 rounded-lg pl-8 pr-3 py-2 text-xs text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+                />
+              </div>
+
+              <div className="max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                {resultados.length === 0 && (
+                  <p className="px-3 py-2 text-[11px] text-slate-400">
+                    Sin coincidencias. Prueba con otra palabra o código.
+                  </p>
+                )}
+
+                {resultados.map((r, i) => (
+                  <button
+                    type="button"
+                    key={`${r.codigo}-${i}`}
+                    onClick={() =>
+                      elegir(
+                        r.codigo,
+                        r.ocupacion
+                      )
+                    }
+                    className="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50 cursor-pointer flex gap-2"
+                  >
+                    <span className="font-mono font-bold text-[#003B7A] shrink-0">
+                      {r.codigo}
+                    </span>
+
+                    <span className="text-slate-700">
+                      {r.ocupacion}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  elegir("", "")
+                }
+                className="text-[11px] font-bold text-amber-700 hover:underline cursor-pointer"
+              >
+                Marcar como oficio no calificado
+              </button>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+/* ============================================================
+   COMPONENTE PRINCIPAL
+   ============================================================ */
+
+export default function App() {
+  const hoy = new Date();
+
+  /* ---------------- Empresa ---------------- */
+
+  const [datosEmpresa, setDatosEmpresa] =
+    useState({
+      nombreEmpresa: "",
+      nit: "",
+      representanteLegal: "",
+      documentoRepresentante: "",
+      direccion: "",
+      telefonos: "",
+      email: "",
+    });
+
+  const nombreEmpresa =
+    datosEmpresa.nombreEmpresa;
+
+  /* ---------------- Configuración ---------------- */
+
+  const [jornadaEmpresa, setJornadaEmpresa] =
+    useState("auto");
+
+  const [baseDias, setBaseDias] =
+    useState("real");
+
+  const [periodo, setPeriodo] = useState({
+    mes: hoy.getMonth(),
+    anio: hoy.getFullYear(),
+  });
+
+  const [anioTexto, setAnioTexto] =
+    useState(
+      String(hoy.getFullYear())
+    );
+
+  const [meses, setMeses] = useState(() =>
+    generarMeses(
+      hoy.getMonth(),
+      hoy.getFullYear(),
+      "auto"
+    )
+  );
+
+  const [aprendicesActivos, setAprendicesActivos] =
+    useState(0);
+
+  /* ---------------- Resultados ---------------- */
+
+  const [
+    resultadosPorMes,
+    setResultadosPorMes,
+  ] = useState({});
+
+  const [
+    homologacion,
+    setHomologacion,
+  ] = useState({});
+
+  const [
+    cargando,
+    setCargando,
+  ] = useState(false);
+
+  const [
+    exportando,
+    setExportando,
+  ] = useState(false);
+
+  const [
+    error,
+    setError,
+  ] = useState(null);
+
+  const [
+    avisos,
+    setAvisos,
+  ] = useState([]);
+
+  const [
+    mostrarInstrucciones,
+    setMostrarInstrucciones,
+  ] = useState(true);
+
+  const [
+    mesActivo,
+    setMesActivo,
+  ] = useState(null);
+
+  const [
+    pendientesManuales,
+    setPendientesManuales,
+  ] = useState([]);
+
+  /* ==========================================================
+     CONFIGURACIÓN DE EMPRESA
+     ========================================================== */
+
+  const actualizarEmpresa = (
+    campo,
+    valor
+  ) => {
+    setDatosEmpresa((prev) => ({
+      ...prev,
+      [campo]: valor,
+    }));
+  };
+
+  /* ==========================================================
+     LIMPIAR
+     ========================================================== */
+
+  const limpiarResultados = () => {
+    setResultadosPorMes({});
+    setMesActivo(null);
+    setAvisos([]);
     setError(null);
-    try {
-      const cargosUnicos = new Set();
-      for (const mes of meses) {
-        if (!mes.nomina) continue;
-        const buffer = await mes.nomina.arrayBuffer();
-        const empleados = leerNomina(buffer);
-        empleados.forEach((e) => e.cargo && cargosUnicos.add(e.cargo.toUpperCase()));
-      }
-      if (cargosUnicos.size === 0) {
-        setError("Carga al menos una nómina antes de traducir los cargos.");
-        return null;
-      }
-      const traducciones = await traducirCargosConIA(Array.from(cargosUnicos));
-      setError(null);
-      return traducciones;
-    } catch (err) {
-      setError("Error al traducir cargos con IA: " + (err.message || err));
-      return null;
-    } finally {
-      setTraduciendo(false);
-    }
+    setPendientesManuales([]);
   };
 
-  const procesarTodosLosMeses = async () => {
-    const mesesConArchivos = meses.filter((m) => m.nomina && m.segSocial && m.etiqueta);
-    if (mesesConArchivos.length === 0) {
-      setError("Completa al menos un mes con nombre de mes, nómina y Seguridad Social.");
+  /* ==========================================================
+     PERIODO
+     ========================================================== */
+
+  const cambiarPeriodo = (
+    mes,
+    anio
+  ) => {
+    if (
+      !Number.isInteger(anio) ||
+      anio < 2000 ||
+      anio > 2100
+    ) {
       return;
     }
 
-    setCargando(true);
-    setError(null);
+    setPeriodo({
+      mes,
+      anio,
+    });
 
-    try {
-      const traduccionesIA = await traducirCargosDeTodosLosMeses();
+    setAnioTexto(
+      String(anio)
+    );
 
-      const nuevosResultados = {};
-      const nuevosCno = {};
+    setMeses(
+      generarMeses(
+        mes,
+        anio,
+        jornadaEmpresa
+      )
+    );
 
-      for (const mes of mesesConArchivos) {
-        const bytesNomina = await mes.nomina.arrayBuffer();
-        const bytesSegSocial = await mes.segSocial.arrayBuffer();
+    limpiarResultados();
+  };
 
-        const empleadosNomina = leerNomina(bytesNomina);
-        const documentosSegSocial = leerSeguridadSocial(bytesSegSocial);
+  /* ==========================================================
+     JORNADA
+     ========================================================== */
 
-        const empleadosProcesados = empleadosNomina.map((emp) => {
-          const proporcion = calcularProporcionPorFechas(
-            emp.fechaIngreso,
-            emp.fechaRetiro,
-            mes.anio,
-            mes.mesIndex
+  const cambiarJornadaEmpresa = (
+    valor
+  ) => {
+    setJornadaEmpresa(valor);
+
+    setMeses((prev) =>
+      generarMeses(
+        periodo.mes,
+        periodo.anio,
+        valor,
+        prev
+      )
+    );
+
+    if (
+      Object.keys(resultadosPorMes)
+        .length > 0
+    ) {
+      setAvisos((prev) => [
+        ...prev,
+        "Cambiaste la jornada de la empresa después de procesar. Debes volver a procesar los meses para que el cambio quede aplicado.",
+      ]);
+    }
+  };
+
+  const actualizarMes = (
+    id,
+    campo,
+    valor
+  ) => {
+    setMeses((prev) =>
+      prev.map((m) =>
+        m.id === id
+          ? {
+              ...m,
+              [campo]: valor,
+              ...(campo ===
+                "jornadaSemanal"
+                ? {
+                    jornadaManual:
+                      true,
+                  }
+                : {}),
+            }
+          : m
+      )
+    );
+
+    if (
+      campo === "jornadaSemanal" &&
+      Object.keys(resultadosPorMes)
+        .length > 0
+    ) {
+      setAvisos((prev) => [
+        ...prev,
+        "Modificaste una jornada mensual después de procesar. Vuelve a procesar los meses antes de exportar.",
+      ]);
+    }
+  };
+
+  /* ==========================================================
+     HOMOLOGACIÓN
+     ========================================================== */
+
+  const aplicarCambioHomologacion = (
+    clave,
+    cambios
+  ) => {
+    const actual =
+      homologacion[clave] || {};
+
+    const siguiente = {
+      ...homologacion,
+
+      [clave]: {
+        ...actual,
+        ...cambios,
+      },
+    };
+
+    setHomologacion(
+      siguiente
+    );
+
+    /*
+     * Solamente guardamos si realmente existe
+     * una empresa identificada.
+     */
+    if (
+      nombreEmpresa.trim()
+    ) {
+      guardarHomologacion(
+        nombreEmpresa.trim(),
+        siguiente
+      );
+    }
+  };
+
+  /*
+   * Ya NO confirma automáticamente cargos
+   * que no tengan código.
+   *
+   * Esto evita que "Confirmar todos" termine
+   * aprobando sugerencias de baja cobertura.
+   */
+  const confirmarTodas = () => {
+    const siguiente =
+      Object.fromEntries(
+        Object.entries(
+          homologacion
+        ).map(([k, v]) => {
+          if (
+            v.codigo ||
+            v.estadoCodigo ===
+              "no_calificado"
+          ) {
+            return [
+              k,
+              {
+                ...v,
+                confirmado: true,
+              },
+            ];
+          }
+
+          return [
+            k,
+            {
+              ...v,
+              confirmado: false,
+            },
+          ];
+        })
+      );
+
+    setHomologacion(
+      siguiente
+    );
+
+    if (
+      nombreEmpresa.trim()
+    ) {
+      guardarHomologacion(
+        nombreEmpresa.trim(),
+        siguiente
+      );
+    }
+  };
+
+  /* ==========================================================
+     PROCESAMIENTO
+     ========================================================== */
+
+  const procesarTodosLosMeses =
+    async () => {
+      const conArchivos =
+        meses.filter(
+          (m) =>
+            m.nomina &&
+            m.segSocial
+        );
+
+      if (
+        conArchivos.length === 0
+      ) {
+        setError(
+          "Carga al menos un mes con nómina y Seguridad Social."
+        );
+        return;
+      }
+
+      setCargando(true);
+      setError(null);
+      setAvisos([]);
+
+      try {
+        const nuevosAvisos = [];
+
+        const base =
+          baseDias === "30"
+            ? 30
+            : "real";
+
+        /* ====================================================
+           1. LEER ARCHIVOS
+           ==================================================== */
+
+        const leidos = [];
+
+        for (
+          const mes of conArchivos
+        ) {
+          let nom;
+          let ss;
+
+          try {
+            nom =
+              parsearNomina(
+                await leerFilas(
+                  mes.nomina
+                )
+              );
+          } catch (e) {
+            throw new Error(
+              `${mes.etiqueta} · Nómina (${mes.nomina.name}): ${e.message}`
+            );
+          }
+
+          try {
+            ss =
+              parsearSeguridadSocial(
+                await leerFilas(
+                  mes.segSocial
+                )
+              );
+          } catch (e) {
+            throw new Error(
+              `${mes.etiqueta} · Seguridad Social (${mes.segSocial.name}): ${e.message}`
+            );
+          }
+
+          const registrosSS =
+            obtenerRegistrosSS(
+              ss
+            );
+
+          leidos.push({
+            mes,
+            nom,
+            ss,
+            registrosSS,
+          });
+        }
+
+        /* ====================================================
+           2. CARGOS ÚNICOS
+           ==================================================== */
+
+        const cargos =
+          new Map();
+
+        leidos.forEach(
+          ({ nom }) => {
+            nom.empleados.forEach(
+              (e) => {
+                if (
+                  !cargos.has(
+                    e.cargoKey
+                  )
+                ) {
+                  cargos.set(
+                    e.cargoKey,
+                    e.cargo
+                  );
+                }
+              }
+            );
+          }
+        );
+
+        /* ====================================================
+           3. HOMOLOGACIÓN GUARDADA
+           ==================================================== */
+
+        const previo = {
+          ...(nombreEmpresa.trim()
+            ? cargarHomologacionGuardada(
+                nombreEmpresa.trim()
+              )
+            : {}),
+          ...homologacion,
+        };
+
+        const porTraducir =
+          [
+            ...cargos.keys(),
+          ].filter(
+            (k) =>
+              !previo[k]?.es &&
+              k !== "(SIN CARGO)"
           );
-          const sugerencias = obtenerSugerenciasCNO(emp.cargo, traduccionesIA);
-          const cargoTraducido = obtenerCargoTraducido(emp.cargo, traduccionesIA);
-          return {
-            ...emp,
-            cargoTraducido,
-            proporcion: Number(proporcion.toFixed(2)),
-            trabajoCompleto: proporcion >= 0.999,
-            enSegSocial: documentosSegSocial.has(emp.documento),
-            sugerenciasCno: sugerencias,
-            cnoPorDefecto: sugerencias[0]?.codigo || "",
+
+        let traducciones =
+          {};
+
+        if (
+          porTraducir.length >
+          0
+        ) {
+          try {
+            traducciones =
+              await traducirCargosConIA(
+                porTraducir
+              );
+
+            const sinTraducir =
+              porTraducir.filter(
+                (k) =>
+                  !traducciones[k]
+              ).length;
+
+            if (
+              sinTraducir > 0
+            ) {
+              nuevosAvisos.push(
+                `${sinTraducir} cargo(s) no vinieron traducidos; se dejó el texto original.`
+              );
+            }
+          } catch (e) {
+            nuevosAvisos.push(
+              `No se pudo traducir con IA (${e.message}). ¿Está corriendo server.js en ${API_URL}? Se dejó el cargo original.`
+            );
+          }
+        }
+
+        const nuevaHomologacion =
+          construirHomologacion(
+            cargos,
+            traducciones,
+            previo,
+            INDICE_CNO
+          );
+
+        /*
+         * Los cargos que no tienen suficiente evidencia
+         * deben quedar pendientes.
+         */
+        Object.entries(
+          nuevaHomologacion
+        ).forEach(
+          ([k, h]) => {
+            if (
+              !h.codigo &&
+              h.estadoCodigo !==
+                "no_calificado"
+            ) {
+              nuevaHomologacion[
+                k
+              ] = {
+                ...h,
+                confirmado: false,
+                estadoCodigo:
+                  "sin_codigo_encontrado",
+              };
+            }
+          }
+        );
+
+        /* ====================================================
+           4. RESULTADOS POR MES
+           ==================================================== */
+
+        const nuevos = {};
+
+        const pendientes =
+          [];
+
+        for (
+          const {
+            mes,
+            nom,
+            registrosSS,
+          } of leidos
+        ) {
+          const vistos =
+            new Set();
+
+          const duplicados =
+            [];
+
+          const fuera =
+            new Map();
+
+          const empleados =
+            [];
+
+          /*
+           * --------------------------------------------------
+           * 4A. PERSONAS DE NÓMINA
+           * --------------------------------------------------
+           */
+
+          for (
+            const original of
+              nom.empleados
+          ) {
+            const documento =
+              normalizarDocumento(
+                original.documento
+              );
+
+            if (!documento)
+              continue;
+
+            if (
+              vistos.has(
+                documento
+              )
+            ) {
+              duplicados.push(
+                documento
+              );
+              continue;
+            }
+
+            vistos.add(
+              documento
+            );
+
+            const registroSS =
+              obtenerRegistroSS(
+                registrosSS,
+                documento
+              );
+
+            /*
+             * Si SS trae fecha de ingreso,
+             * se prioriza para el cruce.
+             */
+            const fechaIngreso =
+              registroSS?.fechaIngreso ||
+              original.fechaIngreso ||
+              null;
+
+            /*
+             * La fecha de retiro debe venir
+             * de Seguridad Social.
+             */
+            const fechaRetiro =
+              registroSS?.fechaRetiro ||
+              original.fechaRetiro ||
+              null;
+
+            const empleado = {
+              ...original,
+              documento,
+              fechaIngreso,
+              fechaRetiro,
+            };
+
+            const calculo =
+              calcularProporcionConSS(
+                {
+                  empleado,
+                  registroSS,
+                  mes,
+                  base,
+                }
+              );
+
+            if (
+              calculo.proporcionFechas <=
+              0
+            ) {
+              fuera.set(
+                documento,
+                {
+                  ...empleado,
+                  registroSS,
+                }
+              );
+
+              continue;
+            }
+
+            empleados.push({
+              ...empleado,
+
+              proporcion:
+                calculo.proporcionFechas,
+
+              proporcionFechas:
+                calculo.proporcionFechas,
+
+              proporcionHoras:
+                calculo.proporcionHoras,
+
+              horasPila:
+                calculo.horasSS,
+
+              horasLaboradas:
+                calculo.horasSS,
+
+              horasOrdinariasMes:
+                calculo.horasOrdinariasMes,
+
+              diferenciaProporcion:
+                calculo.diferencia,
+
+              hayDiferenciaHoras:
+                calculo.hayDiferenciaHoras,
+
+              trabajoCompleto:
+                calculo.proporcionFechas >=
+                1,
+
+              enSegSocial:
+                Boolean(
+                  registroSS
+                ),
+
+              fechaIngresoSS:
+                registroSS?.fechaIngreso ||
+                null,
+
+              fechaRetiroSS:
+                registroSS?.fechaRetiro ||
+                null,
+
+              novedad:
+                describirNovedad(
+                  empleado,
+                  mes.anio,
+                  mes.mesIndex
+                ),
+            });
+          }
+
+          /*
+           * --------------------------------------------------
+           * 4B. PERSONAS QUE SOLO ESTÁN EN SEGURIDAD SOCIAL
+           *
+           * Aquí está uno de los cambios importantes.
+           * Ya NO las dejamos simplemente como una diferencia.
+           * Intentamos incorporarlas.
+           * --------------------------------------------------
+           */
+
+          const documentosNomina =
+            new Set(
+              empleados.map(
+                (e) =>
+                  normalizarDocumento(
+                    e.documento
+                  )
+              )
+            );
+
+          const sinMatchSS =
+            empleados.filter(
+              (e) =>
+                !e.enSegSocial
+            );
+
+          const soloEnSS =
+            [];
+
+          for (
+            const [
+              documento,
+              registroSS,
+            ] of registrosSS
+          ) {
+            if (
+              documentosNomina.has(
+                documento
+              )
+            ) {
+              continue;
+            }
+
+            /*
+             * Buscar el trabajador en
+             * otros meses.
+             */
+            const historico =
+              buscarCargoHistorico(
+                documento,
+                leidos,
+                mes.id
+              );
+
+            const fechaIngreso =
+              registroSS?.fechaIngreso ||
+              historico?.fechaIngreso ||
+              null;
+
+            const fechaRetiro =
+              registroSS?.fechaRetiro ||
+              null;
+
+            /*
+             * Si no tenemos cargo, queda
+             * pendiente para asignarlo manualmente.
+             */
+            if (!historico) {
+              pendientes.push({
+                mesId: mes.id,
+                etiqueta:
+                  mes.etiqueta,
+                documento,
+                nombre:
+                  registroSS?.nombre ||
+                  "",
+                cargo:
+                  "",
+                fechaIngreso,
+                fechaRetiro,
+                horasLaboradas:
+                  redondearHoras(
+                    registroSS?.horasLaboradas ??
+                      registroSS?.horas ??
+                      0
+                  ),
+                registroSS,
+              });
+
+              soloEnSS.push({
+                documento,
+                nombre:
+                  registroSS?.nombre ||
+                  "",
+                fechaIngreso,
+                fechaRetiro,
+                cargo: "",
+                pendienteCargo:
+                  true,
+                nota:
+                  "Está en Seguridad Social pero no aparece en ninguna nómina cargada. Debes asignar el cargo manualmente o cargar la nómina del mes anterior.",
+              });
+
+              continue;
+            }
+
+            /*
+             * Ya tenemos cargo histórico.
+             */
+            const empleadoHistorico =
+              {
+                ...historico,
+                documento,
+                fechaIngreso,
+                fechaRetiro,
+              };
+
+            const calculo =
+              calcularProporcionConSS(
+                {
+                  empleado:
+                    empleadoHistorico,
+                  registroSS,
+                  mes,
+                  base,
+                }
+              );
+
+            /*
+             * Si por fechas no trabajó en el mes,
+             * no lo incluimos.
+             */
+            if (
+              calculo.proporcionFechas <=
+              0
+            ) {
+              soloEnSS.push({
+                documento,
+                nombre:
+                  empleadoHistorico.nombre ||
+                  registroSS?.nombre ||
+                  "",
+                fechaIngreso,
+                fechaRetiro,
+                cargo:
+                  empleadoHistorico.cargo,
+                pendienteCargo:
+                  false,
+                nota:
+                  `Está en Seguridad Social, pero las fechas calculadas dejan una proporción de 0. Ingreso: ${formatFecha(fechaIngreso) || "s/f"} · Retiro: ${formatFecha(fechaRetiro) || "s/f"}.`,
+              });
+
+              continue;
+            }
+
+            empleados.push({
+              ...empleadoHistorico,
+
+              esRetirado:
+                true,
+
+              vieneDeOtroMes:
+                true,
+
+              proporcion:
+                calculo.proporcionFechas,
+
+              proporcionFechas:
+                calculo.proporcionFechas,
+
+              proporcionHoras:
+                calculo.proporcionHoras,
+
+              horasPila:
+                calculo.horasSS,
+
+              horasLaboradas:
+                calculo.horasSS,
+
+              horasOrdinariasMes:
+                calculo.horasOrdinariasMes,
+
+              diferenciaProporcion:
+                calculo.diferencia,
+
+              hayDiferenciaHoras:
+                calculo.hayDiferenciaHoras,
+
+              trabajoCompleto:
+                calculo.proporcionFechas >=
+                1,
+
+              enSegSocial:
+                true,
+
+              fechaIngresoSS:
+                registroSS?.fechaIngreso ||
+                null,
+
+              fechaRetiroSS:
+                registroSS?.fechaRetiro ||
+                null,
+
+              novedad:
+                "Trabajador encontrado en Seguridad Social y recuperado desde una nómina de otro mes.",
+            });
+          }
+
+          /*
+           * --------------------------------------------------
+           * 4C. HORAS Y ALERTAS
+           * --------------------------------------------------
+           */
+
+          const diferenciasHoras =
+            empleados.filter(
+              (e) =>
+                e.hayDiferenciaHoras
+            );
+
+          if (
+            diferenciasHoras.length >
+            0
+          ) {
+            nuevosAvisos.push(
+              `${mes.etiqueta}: ${diferenciasHoras.length} trabajador(es) presentan diferencia entre la proporción por fechas y la proporción calculada con Horas Laboradas de Seguridad Social.`
+            );
+          }
+
+          if (
+            duplicados.length >
+            0
+          ) {
+            nuevosAvisos.push(
+              `${mes.etiqueta}: ${duplicados.length} documento(s) repetido(s) en la nómina; se contó solo la primera fila.`
+            );
+          }
+
+          if (
+            empleados.length ===
+            0
+          ) {
+            nuevosAvisos.push(
+              `${mes.etiqueta}: no quedó ningún trabajador después del cruce. Revisa las fechas y los archivos.`
+            );
+          }
+
+          /*
+           * --------------------------------------------------
+           * 4D. CUOTA
+           * --------------------------------------------------
+           */
+
+          const cuota =
+            calcularCuotaAprendices(
+              empleados.length
+            );
+
+          /*
+           * --------------------------------------------------
+           * 4E. RESULTADO
+           * --------------------------------------------------
+           */
+
+          nuevos[
+            mes.etiqueta
+          ] = {
+            etiqueta:
+              mes.etiqueta,
+
+            anio:
+              mes.anio,
+
+            mesIndex:
+              mes.mesIndex,
+
+            jornadaSemanal:
+              mes.jornadaSemanal,
+
+            jornadaManual:
+              mes.jornadaManual,
+
+            baseDias:
+              base,
+
+            totalNomina:
+              empleados.length,
+
+            totalSegSocial:
+              registrosSS.size,
+
+            cuotaAprendicesRequerida:
+              cuota,
+
+            aprendicesActivos:
+              Number(
+                aprendicesActivos
+              ) || 0,
+
+            cuadra:
+              empleados.length ===
+              registrosSS.size,
+
+            empleados,
+
+            sinMatchSS,
+
+            soloEnSS,
+
+            duplicados,
+
+            fueraDelMes:
+              fuera.size,
+
+            diferenciasHoras:
+              diferenciasHoras.length,
+
+            horasTotalesPila:
+              empleados.reduce(
+                (suma, e) =>
+                  suma +
+                  redondearHoras(
+                    e.horasPila
+                  ),
+                0
+              ),
           };
-        });
+        }
 
-        const totalNomina = empleadosProcesados.length;
-        const totalSegSocial = documentosSegSocial.size;
-        const noEncontradosEnSegSocial = empleadosProcesados
-          .filter((e) => !e.enSegSocial)
-          .map((e) => e.documento);
+        /* ====================================================
+           5. GUARDAR PENDIENTES
+           ==================================================== */
 
-        nuevosCno[mes.etiqueta] = {};
-        empleadosProcesados.forEach((emp) => {
-          nuevosCno[mes.etiqueta][emp.documento] = emp.cnoPorDefecto;
-        });
+        setPendientesManuales(
+          pendientes
+        );
 
-        nuevosResultados[mes.etiqueta] = {
-          anio: mes.anio,
-          mesIndex: mes.mesIndex,
-          jornadaSemanal: mes.jornadaSemanal, // se congela el valor usado en el procesamiento
-          totalNomina,
-          totalSegSocial,
-          cuotaAprendicesRequerida: calcularCuotaAprendices(totalNomina),
-          cuadra: totalNomina === totalSegSocial,
-          noEncontradosEnSegSocial,
-          empleados: empleadosProcesados,
-        };
+        if (
+          pendientes.length >
+          0
+        ) {
+          nuevosAvisos.push(
+            `${pendientes.length} trabajador(es) de Seguridad Social no pudieron relacionarse con una nómina cargada. Debes asignar el cargo manualmente o cargar una nómina anterior.`
+          );
+        }
+
+        /* ====================================================
+           6. GUARDAR RESULTADOS
+           ==================================================== */
+
+        setHomologacion(
+          nuevaHomologacion
+        );
+
+        setResultadosPorMes(
+          nuevos
+        );
+
+        setMesActivo(
+          conArchivos[0]
+            .etiqueta
+        );
+
+        setAvisos(
+          nuevosAvisos
+        );
+      } catch (err) {
+        setError(
+          err.message ||
+            "Error al procesar los archivos."
+        );
+      } finally {
+        setCargando(false);
       }
-
-      setResultadosPorMes(nuevosResultados);
-      setCnoSeleccionados(nuevosCno);
-      setMesActivo(mesesConArchivos[0].etiqueta);
-    } catch (err) {
-      setError(err.message || "Error al procesar los archivos");
-    } finally {
-      setCargando(false);
-    }
-  };
-
-  // Agrupa por cargo. La clave de agrupación usa el cargo ORIGINAL (inglés) para no
-  // fusionar cargos distintos que por azar tradujeran parecido, pero el nombre que se
-  // muestra y se exporta siempre es la versión en español.
-  const agruparPorCargo = (empleados, cnoDelMes) => {
-    const grupos = {};
-    empleados.forEach((emp) => {
-      const codigo = cnoDelMes[emp.documento] || emp.cnoPorDefecto || "";
-      const esCalificado = Boolean(codigo);
-      const clave = esCalificado ? codigo : `SIN_CNO::${emp.cargo}`;
-      const nombreCargoEs = emp.cargoTraducido || emp.cargo;
-
-      if (!grupos[clave]) {
-        grupos[clave] = {
-          codigo: esCalificado ? codigo : "",
-          nombreCargo: nombreCargoEs,
-          calificado: esCalificado,
-          completos: 0,
-          parciales: [],
-        };
-      }
-      if (emp.trabajoCompleto) {
-        grupos[clave].completos += 1;
-      } else {
-        grupos[clave].parciales.push(emp.proporcion);
-      }
-    });
-    return Object.values(grupos);
-  };
-
-  // logoId: id de imagen retornado por wb.addImage(), o null/undefined si no aplica.
-  // Cuando se pasa, se inserta en la esquina superior derecha de la hoja.
-  const construirHojaMes = (wb, etiquetaMes, resultado, cnoDelMes, incluirEncabezadoEmpresa, logoId) => {
-    const GRIS_ENCABEZADO = "FFD9D9D9";
-    const bordeNegro = {
-      top: { style: "thin", color: { argb: "FF000000" } },
-      bottom: { style: "thin", color: { argb: "FF000000" } },
-      left: { style: "thin", color: { argb: "FF000000" } },
-      right: { style: "thin", color: { argb: "FF000000" } },
     };
 
-    const jornadaDelMes = resultado.jornadaSemanal || 40;
-    const nombreHoja = `MATRIZ ${etiquetaMes}`.slice(0, 31);
-    const ws = wb.addWorksheet(nombreHoja, { views: [{ showGridLines: true }] });
-    ws.columns = [{ width: 32 }, { width: 35 }, { width: 35 }, { width: 32 }];
+  /* ==========================================================
+     CORRECCIÓN MANUAL DE PENDIENTES
+     ========================================================== */
 
-    // Insertar el logo del SENA (si se cargó correctamente) en la esquina superior
-    // derecha, sin invadir las columnas de datos. Se ubica "flotando" sobre las
-    // celdas usando coordenadas en EMU relativas para no desplazar filas/columnas.
-    if (logoId !== null && logoId !== undefined) {
-      ws.addImage(logoId, {
-        tl: { col: 4.1, row: 0.1 },
-        ext: { width: 140, height: 50 },
-        editAs: "oneCell",
-      });
-    }
+  const asignarCargoManual = (
+    pendienteIndex,
+    cargo
+  ) => {
+    setPendientesManuales(
+      (prev) =>
+        prev.map(
+          (p, index) =>
+            index ===
+            pendienteIndex
+              ? {
+                  ...p,
+                  cargo,
+                  cargoKey:
+                    claveCargo(
+                      cargo
+                    ),
+                  pendienteCargo:
+                    false,
+                }
+              : p
+        )
+    );
+  };
 
-    // Encabezado de empresa + periodo + jornada aplicada en TODAS las hojas
-    // (antes solo aparecía en la primera hoja del libro).
-    const tituloEmpresa = nombreEmpresa ? `${nombreEmpresa} — ` : "";
-    const fTitulo = ws.addRow([`${tituloEmpresa}Matriz SENA - ${etiquetaMes}`]);
-    fTitulo.getCell(1).font = { bold: true, size: 12 };
-    ws.mergeCells(fTitulo.number, 1, fTitulo.number, 4);
+  /* ==========================================================
+     EXPORTACIÓN
+     ========================================================== */
 
-    const fSubtitulo = ws.addRow([`Jornada laboral semanal aplicada este periodo: ${jornadaDelMes} horas`]);
-    fSubtitulo.getCell(1).font = { italic: true, size: 9, color: { argb: "FF666666" } };
-    ws.mergeCells(fSubtitulo.number, 1, fSubtitulo.number, 4);
-    ws.addRow([]);
+  const listaResultados =
+    Object.values(
+      resultadosPorMes
+    );
 
-    const fAlerta = ws.addRow([
-      resultado.cuadra
-        ? `OK: Nómina (${resultado.totalNomina}) coincide con Seguridad Social (${resultado.totalSegSocial})`
-        : `⚠ ALERTA: Nómina (${resultado.totalNomina}) NO coincide con Seguridad Social (${resultado.totalSegSocial})`,
-    ]);
-    ws.mergeCells(fAlerta.number, 1, fAlerta.number, 4);
-    fAlerta.getCell(1).font = { bold: true, color: { argb: resultado.cuadra ? "FF006100" : "FF9C0006" } };
-    fAlerta.getCell(1).fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: resultado.cuadra ? "FFC6EFCE" : "FFFFC7CE" },
+  const pendientes =
+    Object.values(
+      homologacion
+    ).filter(
+      (h) =>
+        !h.confirmado
+    ).length;
+
+  const exportarMatrizCompleta =
+    async () => {
+      if (
+        listaResultados.length ===
+        0
+      ) {
+        return;
+      }
+
+      if (
+        pendientes > 0 &&
+        !window.confirm(
+          `Hay ${pendientes} cargo(s) sin confirmar en la homologación. ¿Exportar de todas formas?`
+        )
+      ) {
+        return;
+      }
+
+      if (
+        pendientesManuales.some(
+          (p) =>
+            p.pendienteCargo
+        )
+      ) {
+        if (
+          !window.confirm(
+            "Hay trabajadores de Seguridad Social sin cargo asignado. Si exportas ahora podrían quedar fuera de la homologación. ¿Continuar?"
+          )
+        ) {
+          return;
+        }
+      }
+
+      setExportando(true);
+      setError(null);
+
+      try {
+        const {
+          advertenciaLogo,
+        } =
+          await exportarMatrizExcel({
+            nombreEmpresa:
+              nombreEmpresa.trim(),
+
+            /*
+             * NUEVO: datos completos de empresa.
+             */
+            datosEmpresa,
+
+            resultados:
+              listaResultados,
+
+            homologacion,
+
+            baseDias:
+              baseDias === "30"
+                ? 30
+                : "real",
+
+            aprendicesActivos:
+              Number(
+                aprendicesActivos
+              ) || 0,
+
+            pendientesManuales,
+
+            nombreDeCodigo:
+              (codigo) =>
+                nombreDeCodigo(
+                  codigo,
+                  INDICE_CNO
+                ),
+          });
+
+        if (
+          advertenciaLogo
+        ) {
+          setAvisos(
+            (prev) => [
+              ...prev,
+              advertenciaLogo,
+            ]
+          );
+        }
+      } catch (e) {
+        setError(
+          "Error al exportar: " +
+            (e.message || e)
+        );
+      } finally {
+        setExportando(false);
+      }
     };
 
-    const fCuota = ws.addRow([
-      `Cuota de aprendices requerida este periodo (1 por cada 20 trabajadores): ${resultado.cuotaAprendicesRequerida}`,
-    ]);
-    ws.mergeCells(fCuota.number, 1, fCuota.number, 4);
-    fCuota.getCell(1).font = { italic: true, size: 9, color: { argb: "FF444444" } };
-    ws.addRow([]);
+  /* ==========================================================
+     DATOS DERIVADOS
+     ========================================================== */
 
-    const fMatriz1Tit = ws.addRow(["Matriz 1: Oficios Calificados"]);
-    fMatriz1Tit.getCell(1).font = { bold: true, size: 10 };
+  const resultadoActivo =
+    mesActivo
+      ? resultadosPorMes[
+          mesActivo
+        ]
+      : null;
 
-    const fEnc1 = ws.addRow([
-      "CÓDIGO DEL OFICIO SEGÚN LISTADO DE OFICIOS Y OCUPACIONES",
-      "NÚMERO DE TRABAJADORES",
-      "JORNADA LABORAL SEMANAL POR TRABAJADOR",
-      "TOTAL JORNADA LABORAL SEMANAL",
-    ]);
-    fEnc1.height = 28;
-    fEnc1.eachCell((c) => {
-      c.font = { bold: true, size: 8 };
-      c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: GRIS_ENCABEZADO } };
-      c.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-      c.border = bordeNegro;
-    });
-
-    const grupos = agruparPorCargo(resultado.empleados, cnoDelMes);
-    const calificados = grupos.filter((g) => g.calificado);
-    const noCalificados = grupos.filter((g) => !g.calificado);
-
-    const inicioM1 = ws.lastRow.number + 1;
-    calificados.forEach((g) => {
-      if (g.completos > 0) {
-        const f = ws.addRow([g.codigo, g.completos, jornadaDelMes, g.completos * jornadaDelMes]);
-        f.eachCell((c) => {
-          c.border = bordeNegro;
-          c.alignment = { horizontal: "center", vertical: "middle" };
-          c.font = { size: 9 };
-        });
-      }
-      g.parciales.forEach((prop) => {
-        const jornadaProp = Number((jornadaDelMes * prop).toFixed(1));
-        const f = ws.addRow([g.codigo, 1, jornadaProp, jornadaProp]);
-        f.eachCell((c) => {
-          c.border = bordeNegro;
-          c.alignment = { horizontal: "center", vertical: "middle" };
-          c.font = { size: 9, italic: true };
-        });
-      });
-    });
-    const finM1 = ws.lastRow.number;
-
-    const fTotal1 = ws.addRow([
-      "TOTAL",
-      { formula: `SUM(B${inicioM1}:B${finM1})` },
-      "",
-      { formula: `SUM(D${inicioM1}:D${finM1})` },
-    ]);
-    fTotal1.eachCell((c) => {
-      c.font = { bold: true, size: 9 };
-      c.border = bordeNegro;
-      c.alignment = { horizontal: "center", vertical: "middle" };
-      c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: GRIS_ENCABEZADO } };
-    });
-    ws.addRow([]);
-
-    const fMatriz2Tit = ws.addRow(["Matriz 2: Oficios no Calificados"]);
-    fMatriz2Tit.getCell(1).font = { bold: true, size: 10 };
-
-    const fEnc2 = ws.addRow([
-      "NOMBRE DEL CARGO (ESPAÑOL)",
-      "NÚMERO DE TRABAJADORES",
-      "JORNADA LABORAL SEMANAL POR TRABAJADOR",
-      "TOTAL JORNADA LABORAL SEMANAL",
-    ]);
-    fEnc2.height = 28;
-    fEnc2.eachCell((c) => {
-      c.font = { bold: true, size: 8 };
-      c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: GRIS_ENCABEZADO } };
-      c.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-      c.border = bordeNegro;
-    });
-
-    const inicioM2 = ws.lastRow.number + 1;
-    noCalificados.forEach((g) => {
-      if (g.completos > 0) {
-        const f = ws.addRow([g.nombreCargo, g.completos, jornadaDelMes, g.completos * jornadaDelMes]);
-        f.eachCell((c) => {
-          c.border = bordeNegro;
-          c.alignment = { horizontal: "center", vertical: "middle" };
-          c.font = { size: 9 };
-        });
-      }
-      g.parciales.forEach((prop) => {
-        const jornadaProp = Number((jornadaDelMes * prop).toFixed(1));
-        const f = ws.addRow([g.nombreCargo, 1, jornadaProp, jornadaProp]);
-        f.eachCell((c) => {
-          c.border = bordeNegro;
-          c.alignment = { horizontal: "center", vertical: "middle" };
-          c.font = { size: 9, italic: true };
-        });
-      });
-    });
-    if (noCalificados.length === 0) {
-      const f = ws.addRow(["(ninguno)", 0, 0, 0]);
-      f.eachCell((c) => (c.border = bordeNegro));
-    }
-    const finM2 = ws.lastRow.number;
-
-    const fTotal2 = ws.addRow([
-      "TOTAL",
-      { formula: `SUM(B${inicioM2}:B${finM2})` },
-      "",
-      { formula: `SUM(D${inicioM2}:D${finM2})` },
-    ]);
-    fTotal2.eachCell((c) => {
-      c.font = { bold: true, size: 9 };
-      c.border = bordeNegro;
-      c.alignment = { horizontal: "center", vertical: "middle" };
-      c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: GRIS_ENCABEZADO } };
-    });
-  };
-
-  const construirHojaPlantillaPromedio = (wb) => {
-    const ws = wb.addWorksheet("PLANTILLA PROMEDIO");
-    ws.columns = [{ width: 40 }, { width: 20 }];
-
-    if (nombreEmpresa) {
-      const fTitulo = ws.addRow([`${nombreEmpresa} — Plantilla Promedio`]);
-      fTitulo.getCell(1).font = { bold: true, size: 12 };
-      ws.mergeCells(fTitulo.number, 1, fTitulo.number, 2);
-      ws.addRow([]);
-    }
-
-    const fEnc = ws.addRow(["CARGO / CÓDIGO CNO", "PROMEDIO TRABAJADORES (6 MESES)"]);
-    fEnc.eachCell((c) => {
-      c.font = { bold: true };
-      c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
-    });
-
-    const acumulado = {};
-    const etiquetas = Object.keys(resultadosPorMes);
-    etiquetas.forEach((etiqueta) => {
-      const resultado = resultadosPorMes[etiqueta];
-      const cnoDelMes = cnoSeleccionados[etiqueta] || {};
-      const grupos = agruparPorCargo(resultado.empleados, cnoDelMes);
-      grupos.forEach((g) => {
-        const clave = g.calificado ? g.codigo : g.nombreCargo;
-        const totalMes = g.completos + g.parciales.reduce((a, b) => a + b, 0);
-        acumulado[clave] = (acumulado[clave] || 0) + totalMes;
-      });
-    });
-
-    Object.entries(acumulado).forEach(([clave, suma]) => {
-      ws.addRow([clave, Number((suma / (etiquetas.length || 1)).toFixed(2))]);
-    });
-  };
-
-  const exportarMatrizCompleta = async () => {
-    if (Object.keys(resultadosPorMes).length === 0) return;
-
-    const wb = new ExcelJS.Workbook();
-
-    // Cargamos el logo UNA sola vez al workbook y guardamos su id.
-    // Ese id es lo que se debe pasar a ws.addImage() en cada hoja donde
-    // se quiera insertar — cargar la imagen no la inserta por sí sola.
-    let logoId = null;
-    try {
-      const base64Logo = await obtenerImagenBase64("/sena-logo.png");
-      logoId = wb.addImage({ base64: base64Logo, extension: "png" });
-    } catch (e) {
-      console.warn("No se pudo cargar el logo del SENA:", e);
-    }
-
-    Object.entries(resultadosPorMes).forEach(([etiqueta, resultado], idx) => {
-      // Por defecto el logo se inserta solo en la primera hoja (idx === 0).
-      // Si prefieres que salga en TODAS las hojas mensuales, cambia
-      // `idx === 0 ? logoId : null` por simplemente `logoId`.
-      construirHojaMes(wb, etiqueta, resultado, cnoSeleccionados[etiqueta] || {}, idx === 0, idx === 0 ? logoId : null);
-    });
-
-    construirHojaPlantillaPromedio(wb);
-
-    const buffer = await wb.xlsx.writeBuffer();
-    const blob = new Blob([buffer], {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    const prefijoEmpresa = nombreEmpresa
-      ? nombreEmpresa.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_") + "_"
-      : "";
-    a.download = `${prefijoEmpresa}MATRIZ_DETERMINACION_CUOTA_SENA.xlsx`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const resultadoActivo = mesActivo ? resultadosPorMes[mesActivo] : null;
-
-  // Para comparar la cuota de aprendices "actual" usamos el mes más reciente ya procesado.
-  const etiquetasProcesadas = Object.keys(resultadosPorMes);
   const resultadoMasReciente =
-    etiquetasProcesadas.length > 0 ? resultadosPorMes[etiquetasProcesadas[etiquetasProcesadas.length - 1]] : null;
-  const cuotaVigente = resultadoMasReciente ? resultadoMasReciente.cuotaAprendicesRequerida : null;
-  const aprendicesNum = Number(aprendicesActivos) || 0;
+    listaResultados.length >
+    0
+      ? listaResultados[
+          listaResultados.length - 1
+        ]
+      : null;
+
+  const cuotaVigente =
+    resultadoMasReciente
+      ? resultadoMasReciente.cuotaAprendicesRequerida
+      : null;
+
+  const aprendicesNum =
+    Number(
+      aprendicesActivos
+    ) || 0;
+
+  /*
+   * Cantidad de personas por cargo.
+   */
+  const cantidadPorCargo =
+    useMemo(() => {
+      const max = {};
+
+      listaResultados.forEach(
+        (r) => {
+          const conteo = {};
+
+          r.empleados.forEach(
+            (e) => {
+              conteo[
+                e.cargoKey
+              ] =
+                (conteo[
+                  e.cargoKey
+                ] || 0) + 1;
+            }
+          );
+
+          Object.entries(
+            conteo
+          ).forEach(
+            ([k, n]) => {
+              max[k] = Math.max(
+                max[k] || 0,
+                n
+              );
+            }
+          );
+        }
+      );
+
+      return max;
+    }, [resultadosPorMes]);
+
+  /*
+   * Orden de homologaciones.
+   */
+  const homologacionOrdenada =
+    useMemo(
+      () =>
+        Object.entries(
+          homologacion
+        ).sort(
+          (a, b) =>
+            (
+              a[1].es ||
+              ""
+            ).localeCompare(
+              b[1].es ||
+                "",
+              "es"
+            )
+        ),
+      [homologacion]
+    );
+
+  /*
+   * Resumen por cargo y mes.
+   *
+   * Esto es importante porque antes solamente
+   * se mostraban las personas individuales.
+   */
+  const resumenPorCargo =
+    useMemo(() => {
+      const mapa = {};
+
+      listaResultados.forEach(
+        (resultado) => {
+          resultado.empleados.forEach(
+            (empleado) => {
+              const key =
+                empleado.cargoKey;
+
+              if (
+                !mapa[key]
+              ) {
+                mapa[key] = {
+                  cargoKey:
+                    key,
+                  cargoOriginal:
+                    empleado.cargo,
+                  cargoEspanol:
+                    homologacion[
+                      key
+                    ]?.es ||
+                    empleado.cargo,
+                  codigo:
+                    homologacion[
+                      key
+                    ]?.codigo ||
+                    "",
+                  meses: {},
+                };
+              }
+
+              mapa[key].meses[
+                resultado.etiqueta
+              ] =
+                (mapa[key].meses[
+                  resultado.etiqueta
+                ] || 0) + 1;
+            }
+          );
+        }
+      );
+
+      return Object.values(
+        mapa
+      );
+    }, [
+      resultadosPorMes,
+      homologacion,
+    ]);
+
+  const rangoPeriodo =
+    meses.length === 6
+      ? `${meses[0].etiqueta} a ${meses[5].etiqueta}`
+      : "";
+
+  const mesesListos =
+    meses.filter(
+      (m) =>
+        m.nomina &&
+        m.segSocial
+    ).length;
+
+  /* ==========================================================
+     RENDER
+     ========================================================== */
 
   return (
     <div className="min-h-screen bg-slate-50/50 font-sans text-slate-800 antialiased selection:bg-[#003B7A]/10">
-      {/* Header Corporativo */}
+      {/* =====================================================
+          HEADER
+          ===================================================== */}
+
       <header className="bg-white border-b border-slate-200/80 sticky top-0 z-50 backdrop-blur-md bg-white/90">
         <div className="max-w-6xl mx-auto px-6 py-3.5 flex items-center justify-between">
-          <img src="/logo.jpeg" alt="Solutions & Payroll Logo" className="h-9 w-auto object-contain" />
+          <img
+            src="/logo.jpeg"
+            alt="Solutions & Payroll Logo"
+            className="h-9 w-auto object-contain"
+          />
+
           <span className="text-xs font-semibold px-3 py-1 rounded-full bg-slate-100 text-slate-600 border border-slate-200/60 flex items-center gap-1.5">
-            <Building2 className="w-3.5 h-3.5 text-[#003B7A]" /> Módulo SENA
+            <Building2 className="w-3.5 h-3.5 text-[#003B7A]" />
+            Módulo SENA
           </span>
         </div>
       </header>
 
       <main className="max-w-6xl mx-auto px-6 py-10 space-y-8">
-        {/* Banner principal */}
+        {/* ===================================================
+            TITULO
+            =================================================== */}
+
         <section className="text-center space-y-3">
-          <div className="inline-flex items-center gap-2 px-3 .5 py-1 rounded-full bg-blue-50 border border-blue-100 text-[#003B7A] text-xs font-semibold">
-            <Sparkles className="w-3.5 h-3.5" /> Normalización inteligente con IA
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 border border-blue-100 text-[#003B7A] text-xs font-semibold">
+            <Sparkles className="w-3.5 h-3.5" />
+            Normalización inteligente con IA
           </div>
+
           <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight flex items-center justify-center gap-3">
             Gestión de Planta y Matriz SENA
           </h1>
+
           <p className="text-sm text-slate-500 max-w-2xl mx-auto leading-relaxed">
-            Carga los datos de hasta 6 meses, homologa cargos con la Clasificación Nacional de Ocupaciones y genera la matriz requerida para la determinación de cuota.
+            Elige el periodo de presentación,
+            carga nómina y Seguridad Social de
+            los 6 meses, revisa los cruces,
+            homologa los cargos y genera la
+            matriz.
           </p>
         </section>
 
-        {/* Acordeón de Instrucciones */}
+        {/* ===================================================
+            INSTRUCCIONES
+            =================================================== */}
+
         <div className="bg-blue-50/60 border border-blue-100 rounded-2xl p-5 transition-all">
           <button
-            onClick={() => setMostrarInstrucciones(!mostrarInstrucciones)}
-            className="w-full flex items-center justify-between text-left font-bold text-[#003B7A] text-sm"
+            onClick={() =>
+              setMostrarInstrucciones(
+                !mostrarInstrucciones
+              )
+            }
+            className="w-full flex items-center justify-between text-left font-bold text-[#003B7A] text-sm cursor-pointer"
           >
             <span className="flex items-center gap-2">
-              <HelpCircle className="w-4 h-4 text-[#003B7A]" />
+              <HelpCircle className="w-4 h-4" />
               Guía rápida de proceso
             </span>
-            {mostrarInstrucciones ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+
+            {mostrarInstrucciones ? (
+              <ChevronUp className="w-4 h-4" />
+            ) : (
+              <ChevronDown className="w-4 h-4" />
+            )}
           </button>
+
           {mostrarInstrucciones && (
             <div className="mt-4 pt-4 border-t border-blue-100 space-y-3">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-slate-600 font-medium">
                 <div className="p-3 bg-white/80 rounded-xl border border-blue-50/80 shadow-2xs space-y-1">
-                  <span className="font-bold text-[#003B7A] block">1. Carga de Archivos</span>
-                  Indica la empresa, el periodo (ej. "Julio 2026") y sube los archivos de Nómina y Seguridad Social de cada mes.
+                  <span className="font-bold text-[#003B7A] block">
+                    1. Periodo y archivos
+                  </span>
+                  Carga la nómina y Seguridad
+                  Social de cada uno de los seis
+                  meses.
                 </div>
+
                 <div className="p-3 bg-white/80 rounded-xl border border-blue-50/80 shadow-2xs space-y-1">
-                  <span className="font-bold text-[#003B7A] block">2. Configuración</span>
-                  Revisa la jornada laboral semanal sugerida por periodo (cambia con la ley) e indica los aprendices activos.
+                  <span className="font-bold text-[#003B7A] block">
+                    2. Configuración
+                  </span>
+                  Define la jornada de la empresa
+                  y puedes ajustarla individualmente
+                  por mes.
                 </div>
+
                 <div className="p-3 bg-white/80 rounded-xl border border-blue-50/80 shadow-2xs space-y-1">
-                  <span className="font-bold text-[#003B7A] block">3. Procesamiento IA</span>
-                  El sistema traduce y homologa automáticamente la ocupación CNO y valida novedades de ingreso/retiro.
+                  <span className="font-bold text-[#003B7A] block">
+                    3. Cruce
+                  </span>
+                  La Seguridad Social aporta
+                  ingreso, retiro y horas laboradas.
+                  Los retirados se buscan en las
+                  nóminas de otros meses.
                 </div>
+
                 <div className="p-3 bg-white/80 rounded-xl border border-blue-50/80 shadow-2xs space-y-1">
-                  <span className="font-bold text-[#003B7A] block">4. Exportación</span>
-                  Audita las divergencias y genera el libro en Excel listo con el formato de la matriz.
+                  <span className="font-bold text-[#003B7A] block">
+                    4. Homologación
+                  </span>
+                  Revisa manualmente los códigos
+                  CNO antes de confirmar.
                 </div>
               </div>
+
               <div className="p-3 bg-amber-50 rounded-xl border border-amber-200/80 text-xs text-amber-800 font-medium flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
-                Verifica periódicamente que <code className="font-mono">listado-cno.json</code> corresponda a la versión vigente publicada por el SENA: el listado de homologación cambia con cada nueva resolución.
+
+                <span>
+                  Los códigos CNO deben revisarse
+                  contra el listado vigente que
+                  tengas autorizado para el proceso.
+                </span>
               </div>
             </div>
           )}
         </div>
 
-        {/* Datos de la empresa */}
-        <section className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-xs space-y-2">
-          <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-            <Building2 className="w-4 h-4 text-slate-500" /> Nombre de la empresa
-          </label>
-          <input
-            type="text"
-            placeholder="Ej. CIPY S.A.S."
-            value={nombreEmpresa}
-            onChange={(e) => setNombreEmpresa(e.target.value)}
-            className="w-full md:w-1/2 bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-          />
-          <p className="text-[11px] text-slate-400">Aparecerá en cada hoja del Excel exportado y en el nombre del archivo.</p>
+        {/* ===================================================
+            DATOS DE EMPRESA
+            =================================================== */}
+
+        <section className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-xs space-y-5">
+          <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2 uppercase tracking-wider">
+            <Building2 className="w-4 h-4 text-[#003B7A]" />
+            Datos de la empresa
+          </h2>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700">
+                Razón social
+              </label>
+
+              <input
+                type="text"
+                value={
+                  datosEmpresa.nombreEmpresa
+                }
+                onChange={(e) =>
+                  actualizarEmpresa(
+                    "nombreEmpresa",
+                    e.target.value
+                  )
+                }
+                placeholder="Ej. SOLUTIONS & PAYROLL S.A.S."
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700">
+                NIT
+              </label>
+
+              <input
+                type="text"
+                value={
+                  datosEmpresa.nit
+                }
+                onChange={(e) =>
+                  actualizarEmpresa(
+                    "nit",
+                    e.target.value
+                  )
+                }
+                placeholder="Ej. 900000000-1"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700">
+                Representante legal
+              </label>
+
+              <input
+                type="text"
+                value={
+                  datosEmpresa.representanteLegal
+                }
+                onChange={(e) =>
+                  actualizarEmpresa(
+                    "representanteLegal",
+                    e.target.value
+                  )
+                }
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700">
+                CC representante legal
+              </label>
+
+              <input
+                type="text"
+                value={
+                  datosEmpresa.documentoRepresentante
+                }
+                onChange={(e) =>
+                  actualizarEmpresa(
+                    "documentoRepresentante",
+                    e.target.value
+                  )
+                }
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700">
+                Dirección
+              </label>
+
+              <input
+                type="text"
+                value={
+                  datosEmpresa.direccion
+                }
+                onChange={(e) =>
+                  actualizarEmpresa(
+                    "direccion",
+                    e.target.value
+                  )
+                }
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700">
+                Teléfonos
+              </label>
+
+              <input
+                type="text"
+                value={
+                  datosEmpresa.telefonos
+                }
+                onChange={(e) =>
+                  actualizarEmpresa(
+                    "telefonos",
+                    e.target.value
+                  )
+                }
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold"
+              />
+            </div>
+
+            <div className="space-y-1.5 md:col-span-2">
+              <label className="text-xs font-bold text-slate-700">
+                E-mail
+              </label>
+
+              <input
+                type="email"
+                value={
+                  datosEmpresa.email
+                }
+                onChange={(e) =>
+                  actualizarEmpresa(
+                    "email",
+                    e.target.value
+                  )
+                }
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700">
+                Jornada general
+              </label>
+
+              <select
+                value={
+                  jornadaEmpresa
+                }
+                onChange={(e) =>
+                  cambiarJornadaEmpresa(
+                    e.target.value
+                  )
+                }
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold"
+              >
+                <option value="auto">
+                  Legal según el mes
+                </option>
+
+                {JORNADAS.map(
+                  (h) => (
+                    <option
+                      key={h}
+                      value={h}
+                    >
+                      {h} horas fijas
+                    </option>
+                  )
+                )}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5 pt-2">
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                <Calendar className="w-3.5 h-3.5" />
+                Base de días
+              </label>
+
+              <select
+                value={baseDias}
+                onChange={(e) =>
+                  setBaseDias(
+                    e.target.value
+                  )
+                }
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold"
+              >
+                <option value="real">
+                  Días reales del mes
+                </option>
+
+                <option value="30">
+                  30 días
+                </option>
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                <Users className="w-3.5 h-3.5" />
+                Aprendices activos
+              </label>
+
+              <input
+                type="number"
+                min="0"
+                value={
+                  aprendicesActivos
+                }
+                onChange={(e) =>
+                  setAprendicesActivos(
+                    e.target.value
+                  )
+                }
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold"
+              />
+            </div>
+          </div>
         </section>
 
-        {/* Sección de Carga de Meses */}
+        {/* ===================================================
+            MESES
+            =================================================== */}
+
         <section className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-xs space-y-6">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
             <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2 uppercase tracking-wider">
               <Calendar className="w-4 h-4 text-[#003B7A]" />
               Meses a reportar
             </h2>
-            <span className="text-xs text-slate-400 font-medium">Máximo 6 periodos</span>
+
+            <span className="text-xs text-slate-400 font-medium">
+              {mesesListos} de 6 meses
+            </span>
           </div>
 
-          <div className="space-y-3">
-            {meses.map((mes) => (
-              <div
-                key={mes.id}
-                className={`p-4 rounded-xl border transition-all ${
-                  mes.nomina && mes.segSocial
-                    ? "bg-slate-50/50 border-slate-200"
-                    : "bg-white border-slate-200/70 hover:border-slate-300"
-                }`}
-              >
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
-                  {/* Etiqueta y fecha */}
-                  <div className="md:col-span-4 space-y-2">
-                    <label className="text-[11px] uppercase font-extrabold text-slate-500 tracking-wider">Etiqueta del mes</label>
-                    <input
-                      type="text"
-                      placeholder="Ej. Julio 2026"
-                      value={mes.etiqueta}
-                      onChange={(e) => actualizarMes(mes.id, "etiqueta", e.target.value)}
-                      className="w-full bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-semibold text-slate-800 placeholder:text-slate-300 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-                    />
-                    <div className="flex gap-2">
-                      <input
-                        type="number"
-                        value={mes.anio}
-                        onChange={(e) => actualizarMes(mes.id, "anio", Number(e.target.value))}
-                        className="w-1/2 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-600 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-                      />
-                      <select
-                        value={mes.mesIndex}
-                        onChange={(e) => actualizarMes(mes.id, "mesIndex", Number(e.target.value))}
-                        className="w-1/2 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-600 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-                      >
-                        {["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"].map((m, i) => (
-                          <option key={i} value={i}>
-                            {m}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
+          {/* Periodo */}
 
-                  {/* Carga Archivo Nómina */}
-                  <div className="md:col-span-3 space-y-1.5">
-                    <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
-                      <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" /> Nómina (.xlsx)
-                    </label>
-                    <label
-                      className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs cursor-pointer transition ${
-                        mes.nomina
-                          ? "bg-emerald-50/50 border-emerald-200 text-emerald-800"
-                          : "bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100/80"
-                      }`}
-                    >
-                      <span className="truncate max-w-[120px]">{mes.nomina ? mes.nomina.name : "Seleccionar..."}</span>
-                      <Upload className="w-3.5 h-3.5 shrink-0 opacity-60" />
-                      <input
-                        type="file"
-                        accept=".xlsx"
-                        onChange={(e) => actualizarMes(mes.id, "nomina", e.target.files?.[0] || null)}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
-
-                  {/* Carga Archivo Seg Social */}
-                  <div className="md:col-span-3 space-y-1.5">
-                    <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
-                      <FileText className="w-3.5 h-3.5 text-blue-600" /> Seg. Social (.xlsx)
-                    </label>
-                    <label
-                      className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs cursor-pointer transition ${
-                        mes.segSocial
-                          ? "bg-blue-50/50 border-blue-200 text-blue-800"
-                          : "bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100/80"
-                      }`}
-                    >
-                      <span className="truncate max-w-[120px]">{mes.segSocial ? mes.segSocial.name : "Seleccionar..."}</span>
-                      <Upload className="w-3.5 h-3.5 shrink-0 opacity-60" />
-                      <input
-                        type="file"
-                        accept=".xlsx"
-                        onChange={(e) => actualizarMes(mes.id, "segSocial", e.target.files?.[0] || null)}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
-
-                  {/* Jornada semanal por periodo */}
-                  <div className="md:col-span-1.5 space-y-1.5">
-                    <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
-                      <Clock className="w-3.5 h-3.5 text-slate-500" /> Jornada
-                    </label>
-                    <select
-                      value={mes.jornadaSemanal}
-                      onChange={(e) => actualizarMes(mes.id, "jornadaSemanal", Number(e.target.value))}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-                    >
-                      {[40, 42, 44, 46, 47, 48].map((h) => (
-                        <option key={h} value={h}>
-                          {h}h
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Indicator Status */}
-                  <div className="md:col-span-0.5 flex justify-end items-center pt-2 md:pt-0">
-                    {mes.nomina && mes.segSocial ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                        <Check className="w-3 h-3 stroke-[3]" />
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium bg-slate-100 text-slate-400">—</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Configuración de aprendices */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-slate-100">
-            <div className="space-y-1.5">
-              <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                <Users className="w-4 h-4 text-slate-500" /> Aprendices activos actualmente:
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end bg-slate-50/70 border border-slate-200/70 rounded-xl p-4">
+            <div className="md:col-span-4 space-y-1.5">
+              <label className="text-[11px] uppercase font-extrabold text-slate-500 tracking-wider">
+                Mes de presentación
               </label>
+
+              <select
+                value={
+                  periodo.mes
+                }
+                onChange={(e) =>
+                  cambiarPeriodo(
+                    Number(
+                      e.target.value
+                    ),
+                    periodo.anio
+                  )
+                }
+                className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-semibold"
+              >
+                {NOMBRES_MES.map(
+                  (
+                    nombre,
+                    i
+                  ) => (
+                    <option
+                      key={nombre}
+                      value={i}
+                    >
+                      {nombre}
+                      {MESES_PERIODO_SENA.includes(
+                        i
+                      )
+                        ? " (periodo SENA)"
+                        : ""}
+                    </option>
+                  )
+                )}
+              </select>
+            </div>
+
+            <div className="md:col-span-2 space-y-1.5">
+              <label className="text-[11px] uppercase font-extrabold text-slate-500 tracking-wider">
+                Año
+              </label>
+
               <input
                 type="number"
-                min="0"
-                value={aprendicesActivos}
-                onChange={(e) => setAprendicesActivos(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+                value={
+                  anioTexto
+                }
+                onChange={(e) => {
+                  setAnioTexto(
+                    e.target.value
+                  );
+
+                  cambiarPeriodo(
+                    periodo.mes,
+                    Number(
+                      e.target.value
+                    )
+                  );
+                }}
+                className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-semibold"
               />
-              <p className="text-[11px] text-slate-400">
-                Se compara contra la cuota calculada (1 aprendiz por cada 20 trabajadores) del último mes procesado.
-              </p>
             </div>
-            {cuotaVigente !== null && (
-              <div
-                className={`rounded-xl border p-4 flex items-center gap-3 text-xs font-bold ${
-                  aprendicesNum >= cuotaVigente
-                    ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-                    : "bg-amber-50 border-amber-200 text-amber-800"
-                }`}
-              >
-                {aprendicesNum >= cuotaVigente ? (
-                  <CheckCircle2 className="w-5 h-5 shrink-0" />
-                ) : (
-                  <AlertTriangle className="w-5 h-5 shrink-0" />
-                )}
-                <span>
-                  Cuota requerida ({etiquetasProcesadas[etiquetasProcesadas.length - 1]}): {cuotaVigente} aprendiz(es). Actualmente
-                  reportas {aprendicesNum}.
-                  {aprendicesNum < cuotaVigente ? " Faltan por cubrir." : " Cuota cubierta."}
-                </span>
-              </div>
+
+            <p className="md:col-span-6 text-xs text-slate-500">
+              Se reportan:
+              <span className="font-bold text-slate-700 ml-1">
+                {rangoPeriodo}
+              </span>
+            </p>
+          </div>
+
+          {/* Meses */}
+
+          <div className="space-y-3">
+            {meses.map(
+              (mes) => (
+                <div
+                  key={mes.id}
+                  className={`p-4 rounded-xl border ${
+                    mes.nomina &&
+                    mes.segSocial
+                      ? "bg-slate-50/50 border-slate-200"
+                      : "bg-white border-slate-200/70"
+                  }`}
+                >
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+                    <div className="md:col-span-3">
+                      <p className="text-sm font-extrabold text-slate-800">
+                        {mes.etiqueta}
+                      </p>
+
+                      <p className="text-[11px] text-slate-400">
+                        {new Date(
+                          mes.anio,
+                          mes.mesIndex +
+                            1,
+                          0
+                        ).getDate()}{" "}
+                        días
+                      </p>
+                    </div>
+
+                    {/* Nomina */}
+
+                    <div className="md:col-span-3 space-y-1.5">
+                      <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                        Nómina
+                      </label>
+
+                      <label
+                        className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs cursor-pointer ${
+                          mes.nomina
+                            ? "bg-emerald-50/50 border-emerald-200 text-emerald-800"
+                            : "bg-slate-50 border-slate-200 text-slate-400"
+                        }`}
+                      >
+                        <span className="truncate max-w-[140px]">
+                          {mes.nomina
+                            ? mes.nomina
+                                .name
+                            : "Seleccionar..."}
+                        </span>
+
+                        <Upload className="w-3.5 h-3.5 shrink-0" />
+
+                        <input
+                          type="file"
+                          accept=".xlsx,.xls,.csv"
+                          onChange={(
+                            e
+                          ) =>
+                            actualizarMes(
+                              mes.id,
+                              "nomina",
+                              e.target
+                                .files?.[0] ||
+                                null
+                            )
+                          }
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+
+                    {/* Seguridad Social */}
+
+                    <div className="md:col-span-3 space-y-1.5">
+                      <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                        <FileText className="w-3.5 h-3.5 text-blue-600" />
+                        Seguridad Social
+                      </label>
+
+                      <label
+                        className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs cursor-pointer ${
+                          mes.segSocial
+                            ? "bg-blue-50/50 border-blue-200 text-blue-800"
+                            : "bg-slate-50 border-slate-200 text-slate-400"
+                        }`}
+                      >
+                        <span className="truncate max-w-[140px]">
+                          {mes.segSocial
+                            ? mes
+                                .segSocial
+                                .name
+                            : "Seleccionar..."}
+                        </span>
+
+                        <Upload className="w-3.5 h-3.5 shrink-0" />
+
+                        <input
+                          type="file"
+                          accept=".xlsx,.xls,.csv"
+                          onChange={(
+                            e
+                          ) =>
+                            actualizarMes(
+                              mes.id,
+                              "segSocial",
+                              e.target
+                                .files?.[0] ||
+                                null
+                            )
+                          }
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+
+                    {/* Jornada */}
+
+                    <div className="md:col-span-2 space-y-1.5">
+                      <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                        <Clock className="w-3.5 h-3.5 text-slate-500" />
+                        Jornada
+                      </label>
+
+                      <select
+                        value={
+                          mes.jornadaSemanal
+                        }
+                        onChange={(
+                          e
+                        ) =>
+                          actualizarMes(
+                            mes.id,
+                            "jornadaSemanal",
+                            Number(
+                              e.target
+                                .value
+                            )
+                          )
+                        }
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-xs font-semibold"
+                      >
+                        {[
+                          ...new Set([
+                            ...JORNADAS,
+                            mes.jornadaSemanal,
+                          ]),
+                        ]
+                          .sort(
+                            (
+                              a,
+                              b
+                            ) =>
+                              a -
+                              b
+                          )
+                          .map(
+                            (h) => (
+                              <option
+                                key={h}
+                                value={
+                                  h
+                                }
+                              >
+                                {h}h
+                              </option>
+                            )
+                          )}
+                      </select>
+
+                      {mes.jornadaManual && (
+                        <p className="text-[10px] text-blue-700 font-semibold">
+                          Ajuste manual
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="md:col-span-1 flex md:justify-end">
+                      {mes.nomina &&
+                      mes.segSocial ? (
+                        <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                      ) : (
+                        <span className="text-slate-300">
+                          —
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
             )}
           </div>
 
           <button
-            onClick={procesarTodosLosMeses}
-            disabled={cargando || traduciendo}
-            className="w-full bg-[#003B7A] hover:bg-[#002B5B] disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3.5 rounded-xl transition-all shadow-md hover:shadow-lg disabled:shadow-none text-sm flex items-center justify-center gap-2 cursor-pointer"
+            onClick={
+              procesarTodosLosMeses
+            }
+            disabled={cargando}
+            className="w-full bg-[#003B7A] hover:bg-[#002B5B] disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3.5 rounded-xl transition-all shadow-md text-sm flex items-center justify-center gap-2 cursor-pointer"
           >
-            {traduciendo ? (
+            {cargando ? (
               <>
-                <Sparkles className="w-4 h-4 animate-spin text-amber-300" /> Traduciendo cargos con IA...
-              </>
-            ) : cargando ? (
-              <>
-                <Upload className="w-4 h-4 animate-bounce" /> Procesando archivos...
+                <Sparkles className="w-4 h-4 animate-spin" />
+                Procesando...
               </>
             ) : (
               <>
-                <Sparkles className="w-4 h-4 text-blue-200" /> Procesar todos los meses
+                <Sparkles className="w-4 h-4" />
+                Procesar todos los meses
               </>
             )}
           </button>
         </section>
 
-        {/* Notificación de Error */}
+        {/* ===================================================
+            ERRORES
+            =================================================== */}
+
         {error && (
-          <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs font-semibold flex items-center gap-3 shadow-2xs">
-            <AlertTriangle className="w-5 h-5 flex-shrink-0 text-rose-600" />
+          <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs font-semibold flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 shrink-0" />
             <p>{error}</p>
           </div>
         )}
 
-        {/* Resultados */}
-        {Object.keys(resultadosPorMes).length > 0 && (
-          <section className="space-y-4">
-            {/* Nav tabs */}
-            <div className="flex gap-2 flex-wrap border-b border-slate-200/80 pb-2">
-              {Object.keys(resultadosPorMes).map((etiqueta) => (
-                <button
-                  key={etiqueta}
-                  onClick={() => setMesActivo(etiqueta)}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold border transition-all flex items-center gap-2 cursor-pointer ${
-                    mesActivo === etiqueta
-                      ? "bg-[#003B7A] text-white border-[#003B7A] shadow-xs"
-                      : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
-                  }`}
-                >
-                  {etiqueta}
-                  {resultadosPorMes[etiqueta].cuadra ? (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  ) : (
-                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                  )}
-                </button>
-              ))}
+        {avisos.length > 0 && (
+          <div className="p-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs font-medium flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 shrink-0" />
+
+            <ul className="space-y-1 list-disc pl-4">
+              {avisos.map(
+                (a, i) => (
+                  <li key={i}>
+                    {a}
+                  </li>
+                )
+              )}
+            </ul>
+          </div>
+        )}
+
+        {/* ===================================================
+            PENDIENTES MANUALES
+            =================================================== */}
+
+        {pendientesManuales.length >
+          0 && (
+          <section className="bg-white border border-amber-200 rounded-2xl shadow-xs overflow-hidden">
+            <div className="p-5 border-b border-amber-100 bg-amber-50/60">
+              <h2 className="font-bold text-amber-900 text-base flex items-center gap-2">
+                <UserRoundCheck className="w-5 h-5" />
+                Trabajadores pendientes de asignación
+              </h2>
+
+              <p className="text-xs text-amber-700 mt-1">
+                Estas personas aparecen en Seguridad
+                Social pero no se encontraron en
+                ninguna de las nóminas cargadas.
+                Puedes asignarles el cargo manualmente
+                o cargar una nómina anterior.
+              </p>
             </div>
 
-            {/* Vista detalle del mes activo */}
-            {resultadoActivo && (
-              <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
-                <div className="p-5 border-b border-slate-100 space-y-1.5 bg-slate-50/50">
-                  <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
-                    {nombreEmpresa ? `${nombreEmpresa} — ` : ""}
-                    {mesActivo}
-                    <span className="text-[11px] font-semibold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
-                      Jornada: {resultadoActivo.jornadaSemanal}h
-                    </span>
-                  </h3>
-                  {resultadoActivo.cuadra ? (
-                    <div className="inline-flex items-center gap-2 text-xs text-emerald-800 font-bold bg-emerald-50 border border-emerald-200/60 px-3 py-1 rounded-md">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Nómina ({resultadoActivo.totalNomina}) coincide exactamente con Seguridad Social ({resultadoActivo.totalSegSocial})
-                    </div>
-                  ) : (
-                    <div className="inline-flex items-center gap-2 text-xs text-rose-800 font-bold bg-rose-50 border border-rose-200/60 px-3 py-1 rounded-md">
-                      <AlertTriangle className="w-4 h-4 text-rose-600" /> Discrepancia: Nómina ({resultadoActivo.totalNomina}) vs Seguridad Social ({resultadoActivo.totalSegSocial}). Sin match: {resultadoActivo.noEncontradosEnSegSocial.join(", ") || "ninguno"}
-                    </div>
-                  )}
-                  <div className="inline-flex items-center gap-2 text-xs text-slate-600 font-semibold bg-slate-100 border border-slate-200/60 px-3 py-1 rounded-md ml-0 mt-1">
-                    <Briefcase className="w-4 h-4 text-slate-500" /> Cuota de aprendices requerida este mes: {resultadoActivo.cuotaAprendicesRequerida}
-                  </div>
-                </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-100 text-slate-500 uppercase text-[10px] font-extrabold">
+                  <tr>
+                    <th className="py-3 px-4">
+                      Documento
+                    </th>
+                    <th className="py-3 px-4">
+                      Nombre
+                    </th>
+                    <th className="py-3 px-4">
+                      Ingreso
+                    </th>
+                    <th className="py-3 px-4">
+                      Retiro
+                    </th>
+                    <th className="py-3 px-4">
+                      Horas
+                    </th>
+                    <th className="py-3 px-4">
+                      Cargo manual
+                    </th>
+                  </tr>
+                </thead>
 
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-100/70 text-slate-500 uppercase text-[10px] font-extrabold tracking-wider border-b border-slate-200">
-                      <tr>
-                        <th className="py-3 px-4">Documento</th>
-                        <th className="py-3 px-4">Empleado</th>
-                        <th className="py-3 px-4">Cargo (original)</th>
-                        <th className="py-3 px-4">Cargo (español)</th>
-                        <th className="py-3 px-4">Proporción mes</th>
-                        <th className="py-3 px-4">CNO Asignado</th>
+                <tbody className="divide-y divide-slate-100">
+                  {pendientesManuales.map(
+                    (
+                      p,
+                      index
+                    ) => (
+                      <tr
+                        key={`${p.documento}-${index}`}
+                      >
+                        <td className="py-3 px-4 font-mono">
+                          {
+                            p.documento
+                          }
+                        </td>
+
+                        <td className="py-3 px-4 font-semibold">
+                          {p.nombre ||
+                            "Sin nombre"}
+                        </td>
+
+                        <td className="py-3 px-4">
+                          {formatFecha(
+                            p.fechaIngreso
+                          ) ||
+                            "—"}
+                        </td>
+
+                        <td className="py-3 px-4">
+                          {formatFecha(
+                            p.fechaRetiro
+                          ) ||
+                            "—"}
+                        </td>
+
+                        <td className="py-3 px-4 font-semibold">
+                          {redondearHoras(
+                            p.horasLaboradas
+                          )}
+                        </td>
+
+                        <td className="py-3 px-4">
+                          <input
+                            type="text"
+                            value={
+                              p.cargo ||
+                              ""
+                            }
+                            onChange={(
+                              e
+                            ) =>
+                              asignarCargoManual(
+                                index,
+                                e.target
+                                  .value
+                              )
+                            }
+                            placeholder="Escribe el cargo"
+                            className="w-full min-w-[220px] bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs"
+                          />
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 text-slate-700">
-                      {resultadoActivo.empleados.map((emp) => (
-                        <tr key={emp.documento} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="py-3 px-4 font-mono text-slate-500">{emp.documento}</td>
-                          <td className="py-3 px-4 font-bold text-slate-900">{emp.nombre}</td>
-                          <td className="py-3 px-4 text-slate-400">{emp.cargo}</td>
-                          <td className="py-3 px-4 text-slate-700 font-medium">{emp.cargoTraducido}</td>
-                          <td className="py-3 px-4 font-semibold">
-                            {emp.trabajoCompleto ? (
-                              <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/50">
-                                <CheckCircle2 className="w-3 h-3" /> Completo
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200/50">
-                                {emp.proporcion}
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4">
-                            <select
-                              value={cnoSeleccionados[mesActivo]?.[emp.documento] || ""}
-                              onChange={(e) =>
-                                setCnoSeleccionados({
-                                  ...cnoSeleccionados,
-                                  [mesActivo]: { ...cnoSeleccionados[mesActivo], [emp.documento]: e.target.value },
-                                })
-                              }
-                              className="w-full bg-slate-50 border border-slate-200 rounded-lg p-1.5 text-xs font-medium text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-                            >
-                              {emp.sugerenciasCno.map((sug) => (
-                                <option key={sug.codigo} value={sug.codigo}>
-                                  [{sug.codigo}] {sug.ocupacion}
-                                </option>
-                              ))}
-                              <option value="">(Sin código — No calificado)</option>
-                            </select>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            <div className="flex justify-end pt-2">
-              <button
-                onClick={exportarMatrizCompleta}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-6 py-3.5 rounded-xl transition shadow-md hover:shadow-lg flex items-center gap-2 cursor-pointer"
-              >
-                <Download className="w-4 h-4" /> Exportar Matriz SENA completa (.xlsx)
-              </button>
+                    )
+                  )}
+                </tbody>
+              </table>
             </div>
           </section>
+        )}
+
+        {/* ===================================================
+            RESULTADOS
+            =================================================== */}
+
+        {listaResultados.length >
+          0 && (
+          <>
+            {/* HOMOLOGACION */}
+
+            <section className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
+              <div className="p-5 border-b border-slate-100 bg-slate-50/50 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                    <ListChecks className="w-4 h-4 text-[#003B7A]" />
+                    Homologación de cargos
+                  </h2>
+
+                  <p className="text-[11px] text-slate-500">
+                    Revisa los códigos antes de
+                    confirmarlos.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`text-[11px] font-bold px-2.5 py-1 rounded-full border ${
+                      pendientes === 0
+                        ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                        : "bg-amber-50 text-amber-800 border-amber-200"
+                    }`}
+                  >
+                    {pendientes ===
+                    0
+                      ? "Todos confirmados"
+                      : `${pendientes} por confirmar`}
+                  </span>
+
+                  {pendientes >
+                    0 && (
+                    <button
+                      onClick={
+                        confirmarTodas
+                      }
+                      className="text-[11px] font-bold text-white bg-[#003B7A] px-3 py-1.5 rounded-lg cursor-pointer"
+                    >
+                      Confirmar válidos
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-100/70 text-slate-500 uppercase text-[10px] font-extrabold tracking-wider border-b border-slate-200">
+                    <tr>
+                      <th className="py-3 px-3">
+                        Cargo original
+                      </th>
+
+                      <th className="py-3 px-3">
+                        Cargo español
+                      </th>
+
+                      <th className="py-3 px-3">
+                        Código CNO
+                      </th>
+
+                      <th className="py-3 px-3 text-center">
+                        Personas
+                      </th>
+
+                      <th className="py-3 px-3">
+                        Acción
+                      </th>
+                    </tr>
+                  </thead>
+
+                  <tbody className="divide-y divide-slate-100">
+                    {homologacionOrdenada.map(
+                      ([
+                        clave,
+                        h,
+                      ]) => (
+                        <FilaHomologacion
+                          key={
+                            clave
+                          }
+                          clave={
+                            clave
+                          }
+                          h={h}
+                          cantidad={
+                            cantidadPorCargo[
+                              clave
+                            ] ||
+                            0
+                          }
+                          onCambiar={
+                            aplicarCambioHomologacion
+                          }
+                        />
+                      )
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            {/* =================================================
+                RESUMEN POR CARGO
+                ================================================= */}
+
+            <section className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
+              <div className="p-5 border-b border-slate-100 bg-slate-50/50">
+                <h2 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                  <Briefcase className="w-4 h-4 text-[#003B7A]" />
+                  Resumen por cargo
+                </h2>
+
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Esta es la agrupación que se utilizará
+                  como base para la matriz.
+                </p>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-100/70 text-slate-500 uppercase text-[10px] font-extrabold">
+                    <tr>
+                      <th className="py-3 px-4">
+                        Código CNO
+                      </th>
+
+                      <th className="py-3 px-4">
+                        Cargo
+                      </th>
+
+                      {listaResultados.map(
+                        (r) => (
+                          <th
+                            key={
+                              r.etiqueta
+                            }
+                            className="py-3 px-4 text-center"
+                          >
+                            {r.etiqueta}
+                          </th>
+                        )
+                      )}
+
+                      <th className="py-3 px-4 text-center">
+                        Promedio
+                      </th>
+                    </tr>
+                  </thead>
+
+                  <tbody className="divide-y divide-slate-100">
+                    {resumenPorCargo.map(
+                      (r) => {
+                        const valores =
+                          listaResultados.map(
+                            (
+                              mes
+                            ) =>
+                              r.meses[
+                                mes.etiqueta
+                              ] ||
+                              0
+                          );
+
+                        const suma =
+                          valores.reduce(
+                            (
+                              a,
+                              b
+                            ) =>
+                              a +
+                              b,
+                            0
+                          );
+
+                        const promedio =
+                          listaResultados.length >
+                          0
+                            ? suma /
+                              listaResultados.length
+                            : 0;
+
+                        return (
+                          <tr
+                            key={
+                              r.cargoKey
+                            }
+                            className="hover:bg-slate-50"
+                          >
+                            <td className="py-3 px-4 font-mono font-bold text-[#003B7A]">
+                              {r.codigo ||
+                                "—"}
+                            </td>
+
+                            <td className="py-3 px-4 font-semibold">
+                              {r.cargoEspanol}
+                            </td>
+
+                            {valores.map(
+                              (
+                                valor,
+                                index
+                              ) => (
+                                <td
+                                  key={
+                                    index
+                                  }
+                                  className="py-3 px-4 text-center font-semibold"
+                                >
+                                  {valor}
+                                </td>
+                              )
+                            )}
+
+                            <td className="py-3 px-4 text-center font-bold text-[#003B7A]">
+                              {promedio.toFixed(
+                                2
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      }
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            {/* =================================================
+                DETALLE POR MES
+                ================================================= */}
+
+            <section className="space-y-4">
+              <div className="flex gap-2 flex-wrap border-b border-slate-200/80 pb-2">
+                {listaResultados.map(
+                  (r) => (
+                    <button
+                      key={
+                        r.etiqueta
+                      }
+                      onClick={() =>
+                        setMesActivo(
+                          r.etiqueta
+                        )
+                      }
+                      className={`px-4 py-2 rounded-xl text-xs font-bold border transition-all flex items-center gap-2 cursor-pointer ${
+                        mesActivo ===
+                        r.etiqueta
+                          ? "bg-[#003B7A] text-white border-[#003B7A]"
+                          : "bg-white text-slate-600 border-slate-200"
+                      }`}
+                    >
+                      {r.etiqueta}
+
+                      {r.cuadra ? (
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                      ) : (
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  )
+                )}
+              </div>
+
+              {resultadoActivo && (
+                <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
+                  <div className="p-5 border-b border-slate-100 space-y-2 bg-slate-50/50">
+                    <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                      {nombreEmpresa
+                        ? `${nombreEmpresa} — `
+                        : ""}
+                      {mesActivo}
+
+                      <span className="text-[11px] font-semibold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+                        Jornada:{" "}
+                        {
+                          resultadoActivo.jornadaSemanal
+                        }
+                        h
+                      </span>
+                    </h3>
+
+                    <div className="flex flex-wrap gap-2">
+                      <div className="inline-flex items-center gap-2 text-xs text-slate-700 font-bold bg-slate-100 border border-slate-200 px-3 py-1 rounded-md">
+                        Nómina:
+                        {
+                          resultadoActivo.totalNomina
+                        }
+                      </div>
+
+                      <div className="inline-flex items-center gap-2 text-xs text-slate-700 font-bold bg-slate-100 border border-slate-200 px-3 py-1 rounded-md">
+                        Seguridad Social:
+                        {
+                          resultadoActivo.totalSegSocial
+                        }
+                      </div>
+
+                      <div className="inline-flex items-center gap-2 text-xs text-slate-700 font-bold bg-slate-100 border border-slate-200 px-3 py-1 rounded-md">
+                        Horas PILA:
+                        {
+                          resultadoActivo.horasTotalesPila
+                        }
+                      </div>
+
+                      <div className="inline-flex items-center gap-2 text-xs text-slate-700 font-bold bg-slate-100 border border-slate-200 px-3 py-1 rounded-md">
+                        Cuota:
+                        {
+                          resultadoActivo.cuotaAprendicesRequerida
+                        }
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* CRUCE */}
+
+                  {(resultadoActivo.sinMatchSS.length >
+                    0 ||
+                    resultadoActivo.soloEnSS.length >
+                      0) && (
+                    <details
+                      open={
+                        !resultadoActivo.cuadra
+                      }
+                      className="border-b border-slate-100 px-5 py-3 text-xs"
+                    >
+                      <summary className="font-bold text-slate-700 cursor-pointer">
+                        Diferencias con Seguridad Social
+                      </summary>
+
+                      <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-5">
+                        <div className="space-y-2">
+                          <p className="font-bold text-slate-600">
+                            En nómina, pero no en Seguridad Social
+                          </p>
+
+                          {resultadoActivo.sinMatchSS.length ===
+                          0 ? (
+                            <p className="text-slate-400">
+                              Ninguno.
+                            </p>
+                          ) : (
+                            <div className="max-h-56 overflow-y-auto rounded-lg border border-slate-200">
+                              <table className="w-full text-left">
+                                <thead className="bg-slate-100/70 text-[10px] uppercase text-slate-500">
+                                  <tr>
+                                    <th className="py-2 px-3">
+                                      Documento
+                                    </th>
+
+                                    <th className="py-2 px-3">
+                                      Empleado
+                                    </th>
+
+                                    <th className="py-2 px-3">
+                                      Retiro
+                                    </th>
+                                  </tr>
+                                </thead>
+
+                                <tbody className="divide-y divide-slate-100">
+                                  {resultadoActivo.sinMatchSS.map(
+                                    (
+                                      e
+                                    ) => (
+                                      <tr
+                                        key={
+                                          e.documento
+                                        }
+                                      >
+                                        <td className="py-2 px-3 font-mono">
+                                          {
+                                            e.documento
+                                          }
+                                        </td>
+
+                                        <td className="py-2 px-3 font-semibold">
+                                          {
+                                            e.nombre
+                                          }
+                                        </td>
+
+                                        <td className="py-2 px-3">
+                                          {formatFecha(
+                                            e.fechaRetiro
+                                          ) ||
+                                            "—"}
+                                        </td>
+                                      </tr>
+                                    )
+                                  )}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="space-y-2">
+                          <p className="font-bold text-slate-600">
+                            Recuperados / pendientes de Seguridad Social
+                          </p>
+
+                          <div className="max-h-56 overflow-y-auto rounded-lg border border-slate-200">
+                            <table className="w-full text-left">
+                              <thead className="bg-slate-100/70 text-[10px] uppercase text-slate-500">
+                                <tr>
+                                  <th className="py-2 px-3">
+                                    Documento
+                                  </th>
+
+                                  <th className="py-2 px-3">
+                                    Cargo
+                                  </th>
+
+                                  <th className="py-2 px-3">
+                                    Estado
+                                  </th>
+                                </tr>
+                              </thead>
+
+                              <tbody className="divide-y divide-slate-100">
+                                {resultadoActivo.soloEnSS.map(
+                                  (
+                                    e
+                                  ) => (
+                                    <tr
+                                      key={
+                                        e.documento
+                                      }
+                                    >
+                                      <td className="py-2 px-3 font-mono">
+                                        {
+                                          e.documento
+                                        }
+                                      </td>
+
+                                      <td className="py-2 px-3">
+                                        {e.cargo ||
+                                          "Sin cargo"}
+                                      </td>
+
+                                      <td className="py-2 px-3 text-amber-700">
+                                        {e.nota ||
+                                          "Revisar"}
+                                      </td>
+                                    </tr>
+                                  )
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </div>
+                    </details>
+                  )}
+
+                  {/* DETALLE */}
+
+                  <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-100/70 text-slate-500 uppercase text-[10px] font-extrabold tracking-wider border-b border-slate-200 sticky top-0">
+                        <tr>
+                          <th className="py-3 px-4">
+                            Documento
+                          </th>
+
+                          <th className="py-3 px-4">
+                            Empleado
+                          </th>
+
+                          <th className="py-3 px-4">
+                            Cargo
+                          </th>
+
+                          <th className="py-3 px-4">
+                            Proporción
+                          </th>
+
+                          <th className="py-3 px-4">
+                            Horas PILA
+                          </th>
+
+                          <th className="py-3 px-4">
+                            CNO
+                          </th>
+                        </tr>
+                      </thead>
+
+                      <tbody className="divide-y divide-slate-100">
+                        {resultadoActivo.empleados.map(
+                          (emp) => {
+                            const h =
+                              homologacion[
+                                emp.cargoKey
+                              ];
+
+                            return (
+                              <tr
+                                key={
+                                  emp.documento
+                                }
+                                className="hover:bg-slate-50"
+                              >
+                                <td className="py-3 px-4 font-mono text-slate-500">
+                                  {
+                                    emp.documento
+                                  }
+                                </td>
+
+                                <td className="py-3 px-4 font-bold">
+                                  {
+                                    emp.nombre
+                                  }
+                                </td>
+
+                                <td className="py-3 px-4">
+                                  {
+                                    emp.cargo
+                                  }
+                                </td>
+
+                                <td className="py-3 px-4">
+                                  {emp.proporcion.toFixed(
+                                    2
+                                  )}
+                                </td>
+
+                                <td className="py-3 px-4 font-semibold">
+                                  {redondearHoras(
+                                    emp.horasPila
+                                  )}
+
+                                  {emp.hayDiferenciaHoras && (
+                                    <span
+                                      title="Existe diferencia entre proporción por fechas y por horas PILA"
+                                      className="ml-2 text-amber-600"
+                                    >
+                                      ⚠
+                                    </span>
+                                  )}
+                                </td>
+
+                                <td className="py-3 px-4">
+                                  {h?.codigo ? (
+                                    <span className="font-mono font-bold text-[#003B7A]">
+                                      {
+                                        h.codigo
+                                      }
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-400">
+                                      Sin código
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          }
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* EXPORTAR */}
+
+              <div className="flex justify-end pt-2">
+                <button
+                  onClick={
+                    exportarMatrizCompleta
+                  }
+                  disabled={
+                    exportando
+                  }
+                  className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-xs font-bold px-6 py-3.5 rounded-xl transition shadow-md flex items-center gap-2 cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+
+                  {exportando
+                    ? "Generando Excel..."
+                    : "Exportar Matriz SENA completa (.xlsx)"}
+                </button>
+              </div>
+            </section>
+          </>
         )}
       </main>
     </div>
