@@ -137,8 +137,7 @@ function anchorCentrado(anchosCol, anchoImgPx) {
 // CC y Teléfonos se guardan como texto para que Excel no les cambie el
 // formato (ceros a la izquierda, guiones, etc.).
 // Este bloque SOLO se imprime en las hojas de mes (Matriz 1 / Matriz 2);
-// las demás hojas (Plantilla promedio, Cruce Seg. Social, Homologación) no
-// lo reciben, así que nunca se dibuja ahí.
+// la hoja de Plantilla promedio no lo recibe, así que nunca se dibuja ahí.
 function filaDatosEmpresa(ws, n, datosEmpresa, fechaTexto) {
   const d = datosEmpresa || {};
   const hayDatos = d.razonSocial || d.nit || d.representanteLegal || d.cc || d.direccion || d.telefonos || d.email || fechaTexto;
@@ -209,9 +208,11 @@ function filaDatosEmpresa(ws, n, datosEmpresa, fechaTexto) {
 }
 
 // Crea la hoja con: anchos, configuración de impresión, logo del SENA
-// CENTRADO en la fila 1, título (filas 2-4) y el bloque de datos de la
-// empresa justo debajo (solo si se pasa datosEmpresa). Devuelve { ws, ultimaColumna }.
-function prepararHoja(wb, { nombre, anchos, logoId, logo, titulo, subtitulo, nota, pie, datosEmpresa, fechaTexto }) {
+// CENTRADO en la fila 1, y el bloque de datos de la empresa justo debajo
+// (solo si se pasa datosEmpresa). Ya NO imprime título/subtítulo en negrita
+// e itálica debajo del logo: eso se quitó a pedido. "pie" solo se usa en el
+// pie de página de impresión, no se dibuja en la hoja. Devuelve { ws, n }.
+function prepararHoja(wb, { nombre, anchos, logoId, logo, pie, datosEmpresa, fechaTexto }) {
   const ws = wb.addWorksheet(nombreHojaSeguro(nombre), { views: [{ showGridLines: true }] });
   ws.columns = anchos.map((width) => ({ width }));
   const n = anchos.length;
@@ -247,19 +248,6 @@ function prepararHoja(wb, { nombre, anchos, logoId, logo, titulo, subtitulo, not
     });
   }
 
-  // Filas 2-4: título + subtítulo + nota
-  const f1 = ws.addRow([titulo]);
-  const f2 = ws.addRow([subtitulo || ""]);
-  const f3 = ws.addRow([nota || ""]);
-  f1.height = 26;
-  f2.height = 18;
-  f3.height = 18;
-  [f1, f2, f3].forEach((f) => ws.mergeCells(f.number, 1, f.number, n));
-  f1.getCell(1).font = { bold: true, size: 12 };
-  f1.getCell(1).alignment = { vertical: "middle", wrapText: true };
-  f2.getCell(1).font = { italic: true, size: 9, color: { argb: "FF666666" } };
-  f3.getCell(1).font = { italic: true, size: 8, color: { argb: "FF888888" } };
-
   filaDatosEmpresa(ws, n, datosEmpresa, fechaTexto);
 
   return { ws, n };
@@ -284,10 +272,10 @@ function filaTexto(ws, texto, n, opciones = {}) {
 // ---------------------------------------------------------------------
 // Hoja de un mes (Matriz 1: calificados / Matriz 2: no calificados)
 // Estas hojas son las que se PRESENTAN al SENA: no llevan alertas internas
-// ni la nota de cuota de aprendices (eso se movió a la hoja "Cruce Seg. Social").
-// La Matriz 2 usa las categorías fijas del SENA (Conductor, Vigilante,
-// Mensajero, Personal de Aseo y Cafetería, Empleados FIC, Contratos de
-// Aprendizaje): siempre aparecen las 6, aunque tengan 0 personas ese mes.
+// ni la nota de cuota de aprendices. La Matriz 2 usa las categorías fijas
+// del SENA (Conductor, Vigilante, Mensajero, Personal de Aseo y Cafetería,
+// Empleados FIC, Contratos de Aprendizaje): siempre aparecen las 6, aunque
+// tengan 0 personas ese mes.
 // ---------------------------------------------------------------------
 function construirHojaMes(wb, ctx, resultado) {
   const { nombreEmpresa, homologacion, logo, logoId, datosEmpresa } = ctx;
@@ -305,8 +293,6 @@ function construirHojaMes(wb, ctx, resultado) {
     anchos: [30, 22, 28, 26],
     logo,
     logoId,
-    titulo,
-    subtitulo: `Jornada laboral semanal aplicada este periodo: ${jornadaSemanal} horas`,
     pie: titulo,
     datosEmpresa,
     fechaTexto: etiquetaFechaMes(anio, mesIndex),
@@ -383,8 +369,7 @@ function construirHojaMes(wb, ctx, resultado) {
 // de personas por fila (punto D.4). Si el formulario del SENA pide el
 // promedio calculado sobre las planillas PILA bimestrales en vez de sobre
 // estos 6 meses mensuales, hay que confirmarlo y ajustar aquí (ver punto F).
-// No lleva el bloque de datos de la empresa ni alertas: eso solo va en las
-// hojas de mes.
+// No lleva el bloque de datos de la empresa: eso solo va en las hojas de mes.
 // ---------------------------------------------------------------------
 function construirHojaPlantillaPromedio(wb, ctx, resultados) {
   const { nombreEmpresa, homologacion, nombreDeCodigo } = ctx;
@@ -397,8 +382,6 @@ function construirHojaPlantillaPromedio(wb, ctx, resultados) {
   const { ws, n } = prepararHoja(wb, {
     nombre: "PLANTILLA PROM",
     anchos,
-    titulo,
-    subtitulo: `Suma y promedio (÷ ${plantilla.meses}) calculados sobre los ${plantilla.meses} mes(es) cargado(s)`,
     pie: titulo,
   });
   ws.addRow([]);
@@ -459,109 +442,10 @@ function construirHojaPlantillaPromedio(wb, ctx, resultados) {
 }
 
 // ---------------------------------------------------------------------
-// Cruce con Seguridad Social (resumen) — aquí SÍ van las alertas internas
-// (nómina vs. Seg. Social, cuota de aprendices) que se sacaron de las hojas
-// de mes porque esas se presentan directamente al SENA (punto D.2).
-// No lleva el bloque de datos de la empresa: eso solo va en las hojas de mes.
-// ---------------------------------------------------------------------
-function construirHojaCruce(wb, ctx, resultados) {
-  const { nombreEmpresa, aprendicesActivos } = ctx;
-  const titulo = `${nombreEmpresa ? nombreEmpresa + " — " : ""}Cruce con Seguridad Social (uso interno)`;
-  const { ws, n } = prepararHoja(wb, {
-    nombre: "CRUCE SEG. SOCIAL",
-    anchos: [16, 12, 14, 12, 16, 16, 70],
-    titulo,
-    subtitulo: "Trabajadores en nómina (con al menos 1 día en el mes) frente a Seguridad Social. Hoja de uso interno, no se presenta al SENA.",
-    pie: titulo,
-  });
-  ws.addRow([]);
-
-  if (Number.isFinite(Number(aprendicesActivos))) {
-    filaTexto(ws, `Regla de cuota de aprendices: ${TEXTO_REGLA_CUOTA_APRENDICES}`, n, {
-      fuente: { italic: true, size: 9, color: { argb: "FF444444" } },
-    });
-    filaTexto(ws, `Aprendices activos reportados: ${Number(aprendicesActivos)}`, n, {
-      fuente: { bold: true, size: 9 },
-    });
-    ws.addRow([]);
-  }
-
-  const enc = ws.addRow(["MES", "NÓMINA", "SEG. SOCIAL", "DIFERENCIA", "ESTADO", "CUOTA APRENDICES", "DETALLE"]);
-  enc.eachCell(estiloEncabezado);
-
-  const lista = (arr, max = 12) => (arr.length > max ? `${arr.slice(0, max).join(", ")} … (+${arr.length - max})` : arr.join(", "));
-
-  resultados.forEach((r) => {
-    const detalle = [];
-    if (r.sinMatchSS.length) detalle.push(`En nómina sin Seg. Social: ${lista(r.sinMatchSS.map((e) => e.documentoOriginal || e.documento))}`);
-    if (r.soloEnSS.length) detalle.push(`En Seg. Social sin nómina: ${lista(r.soloEnSS.map((e) => e.documento))}`);
-    if (r.duplicados?.length) detalle.push(`Documentos repetidos en nómina (se contaron una vez): ${lista(r.duplicados)}`);
-    if (r.pendientesAsignacion?.length) detalle.push(`Sin cargo asignado (revisar a mano): ${lista(r.pendientesAsignacion.map((e) => e.documento))}`);
-    if (r.diferenciasProporcion?.length) detalle.push(`Proporción por fechas y por horas SS difieren: ${lista(r.diferenciasProporcion.map((e) => e.documentoOriginal || e.documento))}`);
-
-    const f = ws.addRow([
-      r.etiqueta,
-      r.totalNomina,
-      r.totalSegSocial,
-      r.totalNomina - r.totalSegSocial,
-      r.cuadra ? "Cuadra" : "Revisar",
-      r.cuotaAprendicesRequerida,
-      detalle.join("\n") || "—",
-    ]);
-    f.eachCell((c) => estiloDato(c));
-    f.getCell(7).alignment = { horizontal: "left", vertical: "top", wrapText: true };
-    f.getCell(5).font = { bold: true, size: 9, color: { argb: r.cuadra ? "FF006100" : "FF9C0006" } };
-  });
-
-  cerrarHoja(ws, n);
-}
-
-// ---------------------------------------------------------------------
-// Homologación de cargos
-// No lleva el bloque de datos de la empresa: eso solo va en las hojas de mes.
-// ---------------------------------------------------------------------
-function construirHojaHomologacion(wb, ctx) {
-  const { nombreEmpresa, homologacion } = ctx;
-  const titulo = `${nombreEmpresa ? nombreEmpresa + " — " : ""}Homologación de cargos`;
-  const { ws, n } = prepararHoja(wb, {
-    nombre: "HOMOLOGACIÓN",
-    anchos: [34, 34, 12, 44, 16, 14],
-    titulo,
-    subtitulo: "Cargo original → cargo en español → código del Listado de Oficios y Ocupaciones (CNO)",
-    pie: titulo,
-  });
-  ws.addRow([]);
-
-  const enc = ws.addRow(["CARGO ORIGINAL", "CARGO (ESPAÑOL)", "CÓDIGO CNO", "OCUPACIÓN EN EL LISTADO", "ESTADO", "CONFIRMADO"]);
-  enc.height = 24;
-  enc.eachCell(estiloEncabezado);
-
-  const estadoDe = (h) => {
-    if (h.codigo) return "Calificado";
-    if (h.noCalificado) return "No calificado (a mano)";
-    if (h.sugerenciaBaja) return "Sugerencia de baja cobertura";
-    return "Sin código (no encontrado)";
-  };
-
-  Object.values(homologacion)
-    .sort((a, b) => a.es.localeCompare(b.es, "es"))
-    .forEach((h) => {
-      const f = ws.addRow([h.original, h.es, h.codigo || "(sin código)", h.ocupacion || "", estadoDe(h), h.confirmado ? "Sí" : "No"]);
-      f.eachCell((c) => estiloDato(c, { izquierda: true }));
-      f.getCell(3).alignment = { horizontal: "center", vertical: "middle" };
-      f.getCell(3).numFmt = "@";
-      f.getCell(5).alignment = { horizontal: "left", vertical: "middle" };
-      f.getCell(6).alignment = { horizontal: "center", vertical: "middle" };
-    });
-
-  cerrarHoja(ws, n);
-}
-
-// ---------------------------------------------------------------------
 // API pública
 // ---------------------------------------------------------------------
 // resultados: array de resultados mensuales en orden cronológico
-export async function exportarMatrizExcel({ nombreEmpresa, resultados, homologacion, baseDias, nombreDeCodigo, datosEmpresa, aprendicesActivos }) {
+export async function exportarMatrizExcel({ nombreEmpresa, resultados, homologacion, baseDias, nombreDeCodigo, datosEmpresa }) {
   if (!resultados || resultados.length === 0) throw new Error("No hay resultados para exportar.");
 
   const wb = new ExcelJS.Workbook();
@@ -587,13 +471,10 @@ export async function exportarMatrizExcel({ nombreEmpresa, resultados, homologac
     baseDias,
     nombreDeCodigo: nombreDeCodigo || (() => ""),
     datosEmpresa,
-    aprendicesActivos,
   };
 
   resultados.forEach((r) => construirHojaMes(wb, ctx, r));
   construirHojaPlantillaPromedio(wb, ctx, resultados);
-  construirHojaCruce(wb, ctx, resultados);
-  construirHojaHomologacion(wb, ctx);
 
   const buffer = await wb.xlsx.writeBuffer();
   const blob = new Blob([buffer], {
