@@ -22,6 +22,22 @@ const BORDE = {
   right: { style: "thin", color: NEGRO },
 };
 
+// Convierte "solutions and payroll" -> "Solutions And Payroll" para el
+// encabezado del Excel. Si una palabra ya viene toda en mayúsculas (ej. una
+// sigla como "S.A.S" o "CIPY"), se respeta tal cual y no se toca.
+function capitalizarNombreEmpresa(nombre) {
+  if (!nombre) return "";
+  return nombre
+    .trim()
+    .split(/\s+/)
+    .map((palabra) => {
+      const esSigla = palabra === palabra.toUpperCase() && palabra !== palabra.toLowerCase();
+      if (esSigla) return palabra;
+      return palabra.charAt(0).toUpperCase() + palabra.slice(1).toLowerCase();
+    })
+    .join(" ");
+}
+
 // ---------------------------------------------------------------------
 // Logo
 // ---------------------------------------------------------------------
@@ -564,7 +580,7 @@ export async function exportarMatrizExcel({ nombreEmpresa, resultados, homologac
   }
 
   const ctx = {
-    nombreEmpresa,
+    nombreEmpresa: capitalizarNombreEmpresa(nombreEmpresa),
     homologacion,
     logo,
     logoId,

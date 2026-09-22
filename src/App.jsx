@@ -65,22 +65,63 @@ const RETRASO_GUARDADO_MS = 800;
 const claveMes = (anio, mesIndex) => `${anio}-${mesIndex}`;
 
 // ---------------------------------------------------------------------
-// Traducción de cargos (EN -> ES) a través del servidor proxy local
-// (server.js), que es quien llama a la API de Anthropic con la key del .env.
+// Traducción de cargos (EN -> ES).
+//
+// 1) Primero se intenta con el proxy local (server.js), que llama a la API
+//    de Anthropic con la key del .env. Es la mejor calidad para cargos
+//    técnicos, pero requiere saldo en la cuenta de la API.
+// 2) Si eso falla por cualquier razón (sin servidor, sin saldo, etc.), se
+//    intenta automáticamente con MyMemory (api.mymemory.translated.net),
+//    un servicio de traducción GRATUITO que no necesita API key ni tarjeta.
+//    La calidad es más básica para términos técnicos: revisa y corrige a
+//    mano en la tabla de Homologación lo que haga falta.
 // ---------------------------------------------------------------------
+async function traducirConMyMemory(texto) {
+  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(texto)}&langpair=en|es`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`MyMemory respondió ${resp.status}`);
+  const data = await resp.json();
+  const traducido = data?.responseData?.translatedText;
+  if (!traducido || String(traducido).toUpperCase().includes("MYMEMORY WARNING")) {
+    throw new Error("MyMemory no devolvió una traducción válida");
+  }
+  return traducido;
+}
+
 async function traducirCargosConIA(cargosUnicos) {
-  const response = await fetch(`${API_URL}/api/traducir-cargos`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cargosUnicos }),
-  });
-  if (!response.ok) throw new Error(`El servidor respondió ${response.status}`);
-  const data = await response.json();
-  const normalizadas = {};
-  Object.entries(data.traducciones || {}).forEach(([k, v]) => {
-    if (v && String(v).trim()) normalizadas[claveCargo(k)] = String(v).trim();
-  });
-  return normalizadas;
+  try {
+    const response = await fetch(`${API_URL}/api/traducir-cargos`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cargosUnicos }),
+    });
+    if (!response.ok) throw new Error(`El servidor respondió ${response.status}`);
+    const data = await response.json();
+    const normalizadas = {};
+    Object.entries(data.traducciones || {}).forEach(([k, v]) => {
+      if (v && String(v).trim()) normalizadas[claveCargo(k)] = String(v).trim();
+    });
+    return normalizadas;
+  } catch (errorIA) {
+    // Respaldo gratuito: se traduce cargo por cargo con MyMemory. Con una
+    // pequeña pausa entre llamadas para no golpear su límite gratuito
+    // (~5.000 palabras/día por IP), que para nombres de cargos alcanza bien.
+    console.warn(
+      `Traducción con IA no disponible (${errorIA.message}). Usando MyMemory (gratis) como respaldo.`
+    );
+    const normalizadas = {};
+    for (const cargo of cargosUnicos) {
+      try {
+        const traducido = await traducirConMyMemory(cargo);
+        if (traducido && traducido.trim()) normalizadas[claveCargo(cargo)] = traducido.trim();
+      } catch {
+        // Si también falla para este cargo puntual, se deja sin traducir:
+        // el aviso existente lo señala y se corrige a mano en Homologación.
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return normalizadas;
+  }
 }
 
 async function leerFilas(archivo) {
