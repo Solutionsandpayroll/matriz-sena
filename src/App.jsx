@@ -25,6 +25,7 @@ import {
   Save,
   Loader2,
   Circle,
+  PlusCircle,
 } from "lucide-react";
 import listadoCnoLocal from "./data/listado-cno.json";
 import {
@@ -393,7 +394,9 @@ function ResumenPorCargo({ grupos }) {
 // ---------------------------------------------------------------------
 // Panel lateral: lista de empresas guardadas en el servidor (SQLite),
 // compartida entre todo el equipo. Cargar trae toda la configuración de
-// esa empresa; Guardar empuja la configuración actual en pantalla.
+// esa empresa; Guardar empuja la configuración actual en pantalla;
+// Nueva empresa limpia el formulario para empezar una empresa distinta
+// sin arrastrar los datos de la que estaba cargada.
 // ---------------------------------------------------------------------
 function PanelEmpresas({
   empresas,
@@ -406,6 +409,7 @@ function PanelEmpresas({
   onCargar,
   onEliminar,
   onGuardar,
+  onNuevaEmpresa,
 }) {
   return (
     <aside className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden h-fit">
@@ -413,14 +417,24 @@ function PanelEmpresas({
         <h2 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
           <Building2 className="w-3.5 h-3.5 text-[#003B7A]" /> Empresas guardadas
         </h2>
-        <button
-          type="button"
-          onClick={onRecargar}
-          className="text-slate-400 hover:text-[#003B7A] cursor-pointer"
-          title="Recargar lista"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${cargandoLista ? "animate-spin" : ""}`} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onNuevaEmpresa}
+            className="text-slate-400 hover:text-[#003B7A] cursor-pointer"
+            title="Empezar una empresa nueva (en blanco)"
+          >
+            <PlusCircle className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={onRecargar}
+            className="text-slate-400 hover:text-[#003B7A] cursor-pointer"
+            title="Recargar lista"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${cargandoLista ? "animate-spin" : ""}`} />
+          </button>
+        </div>
       </div>
 
       <div className="max-h-80 overflow-y-auto">
@@ -614,6 +628,30 @@ export default function App() {
     } catch (e) {
       setErrorEmpresas("No se pudo eliminar: " + e.message);
     }
+  };
+
+  // Limpia todo el formulario para empezar una empresa nueva desde cero,
+  // sin arrastrar los datos de la empresa que estaba cargada antes. No
+  // guarda nada en el servidor por sí sola: eso pasa cuando se escribe
+  // el nombre nuevo y se llenan datos (autoguardado) o se da a "Guardar".
+  const nuevaEmpresaEnBlanco = () => {
+    if (
+      (nombreEmpresa.trim() || Object.keys(resultadosPorMes).length > 0) &&
+      !window.confirm("¿Empezar una empresa nueva en blanco? Se perderá lo que no hayas guardado de la empresa actual.")
+    ) {
+      return;
+    }
+    setNombreEmpresa("");
+    setDatosEmpresa({ razonSocial: "", nit: "", representanteLegal: "", cc: "", direccion: "", telefonos: "", email: "" });
+    setJornadaEmpresa("auto");
+    setJornadasManuales({});
+    setBaseDias("real");
+    setAsignacionesManuales({});
+    setHomologacion({});
+    setAprendicesActivos(0);
+    setMeses(generarMeses(periodo.mes, periodo.anio, "auto", {}));
+    limpiarResultados();
+    setErrorEmpresas(null);
   };
 
   // ---------------- Periodo / configuración ----------------
@@ -1190,6 +1228,7 @@ export default function App() {
               onCargar={cargarEmpresaDesdeServidor}
               onEliminar={eliminarEmpresaGuardada}
               onGuardar={guardarEmpresaCompleta}
+              onNuevaEmpresa={nuevaEmpresaEnBlanco}
             />
           </section>
 
@@ -1712,4 +1751,4 @@ export default function App() {
       </main>
     </div>
   );
-};
+}
