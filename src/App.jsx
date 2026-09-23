@@ -24,6 +24,7 @@ import {
   Trash2,
   Save,
   Loader2,
+  Circle,
 } from "lucide-react";
 import listadoCnoLocal from "./data/listado-cno.json";
 import {
@@ -165,6 +166,66 @@ function generarMeses(mesPresentacion, anioPresentacion, jornadaEmpresa, jornada
       segSocial: previos?.[i]?.segSocial ?? null,
     };
   });
+}
+
+// ---------------------------------------------------------------------
+// Encabezado de sección reutilizable: número de paso + título + descripción.
+// Da la misma jerarquía visual a las 4 secciones principales del flujo.
+// ---------------------------------------------------------------------
+function EncabezadoSeccion({ numero, icono: Icono, titulo, descripcion, extra }) {
+  return (
+    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4">
+      <div className="flex items-start gap-3">
+        <span className="flex items-center justify-center w-7 h-7 rounded-full bg-[#003B7A] text-white text-xs font-extrabold shrink-0 mt-0.5">
+          {numero}
+        </span>
+        <div className="space-y-0.5">
+          <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+            {Icono && <Icono className="w-4 h-4 text-[#003B7A]" />}
+            {titulo}
+          </h2>
+          {descripcion && <p className="text-[11px] text-slate-500 max-w-xl leading-relaxed">{descripcion}</p>}
+        </div>
+      </div>
+      {extra}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Panel lateral fijo: muestra los 4 pasos del flujo y su estado, y permite
+// saltar directo a cada sección. Es la brújula de la página completa.
+// ---------------------------------------------------------------------
+function BarraDePasos({ pasos, pasoActivo }) {
+  return (
+    <nav className="hidden lg:block lg:sticky lg:top-20 h-fit">
+      <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs p-4 space-y-0.5 w-56">
+        <p className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider px-2 pb-2">Flujo del reporte</p>
+        {pasos.map((p, i) => {
+          const activo = pasoActivo === p.id;
+          return (
+            <a
+              key={p.id}
+              href={`#${p.id}`}
+              className={`flex items-start gap-2.5 rounded-xl px-2.5 py-2.5 text-xs font-semibold transition-colors ${
+                activo ? "bg-blue-50 text-[#003B7A]" : "text-slate-500 hover:bg-slate-50 hover:text-slate-700"
+              }`}
+            >
+              {p.completo ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+              ) : (
+                <Circle className={`w-4 h-4 shrink-0 mt-0.5 ${activo ? "text-[#003B7A]" : "text-slate-300"}`} />
+              )}
+              <span className="leading-snug">
+                {p.titulo}
+                {p.detalle && <span className="block text-[10px] font-medium text-slate-400 mt-0.5">{p.detalle}</span>}
+              </span>
+            </a>
+          );
+        })}
+      </div>
+    </nav>
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -347,7 +408,7 @@ function PanelEmpresas({
   onGuardar,
 }) {
   return (
-    <aside className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden lg:sticky lg:top-20 h-fit">
+    <aside className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden h-fit">
       <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between gap-2">
         <h2 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
           <Building2 className="w-3.5 h-3.5 text-[#003B7A]" /> Empresas guardadas
@@ -440,7 +501,7 @@ export default function App() {
   const [exportando, setExportando] = useState(false);
   const [error, setError] = useState(null);
   const [avisos, setAvisos] = useState([]);
-  const [mostrarInstrucciones, setMostrarInstrucciones] = useState(true);
+  const [mostrarInstrucciones, setMostrarInstrucciones] = useState(false);
   const [mesActivo, setMesActivo] = useState(null);
   const [necesitaReprocesar, setNecesitaReprocesar] = useState(false);
 
@@ -934,8 +995,36 @@ export default function App() {
   const rangoPeriodo = meses.length === 6 ? `${meses[0].etiqueta} a ${meses[5].etiqueta}` : "";
   const mesesListos = meses.filter((m) => m.nomina && m.segSocial).length;
 
+  // ---------------- Estado del flujo, para la barra de pasos ----------------
+  const pasos = [
+    {
+      id: "seccion-empresa",
+      titulo: "1. Empresa",
+      detalle: nombreEmpresa.trim() || "Sin nombre aún",
+      completo: !!nombreEmpresa.trim(),
+    },
+    {
+      id: "seccion-meses",
+      titulo: "2. Periodo y archivos",
+      detalle: `${mesesListos} de 6 meses listos`,
+      completo: mesesListos === 6,
+    },
+    {
+      id: "seccion-homologacion",
+      titulo: "3. Homologación",
+      detalle: listaResultados.length === 0 ? "Aún sin procesar" : pendientes === 0 ? "Todo confirmado" : `${pendientes} por confirmar`,
+      completo: listaResultados.length > 0 && pendientes === 0,
+    },
+    {
+      id: "seccion-resultados",
+      titulo: "4. Resultados y exportar",
+      detalle: listaResultados.length === 0 ? "Pendiente" : "Listo para exportar",
+      completo: listaResultados.length > 0,
+    },
+  ];
+
   return (
-    <div className="min-h-screen bg-slate-50/50 font-sans text-slate-800 antialiased selection:bg-[#003B7A]/10">
+    <div className="min-h-screen bg-slate-50/50 font-sans text-slate-800 antialiased selection:bg-[#003B7A]/10 [&_section]:scroll-mt-24">
       {/* Header Corporativo */}
       <header className="bg-white border-b border-slate-200/80 sticky top-0 z-50 backdrop-blur-md bg-white/90">
         <div className="max-w-6xl mx-auto px-6 py-3.5 flex items-center justify-between">
@@ -946,13 +1035,13 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-6 py-10 space-y-8">
-        {/* Banner principal */}
+      {/* Banner principal + guía, a todo lo ancho */}
+      <div className="max-w-6xl mx-auto px-6 pt-10 space-y-6">
         <section className="text-center space-y-3">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 border border-blue-100 text-[#003B7A] text-xs font-semibold">
             <Sparkles className="w-3.5 h-3.5" /> Normalización inteligente con IA
           </div>
-          <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight flex items-center justify-center gap-3">
+          <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight">
             Gestión de Planta y Matriz SENA
           </h1>
           <p className="text-sm text-slate-500 max-w-2xl mx-auto leading-relaxed">
@@ -960,7 +1049,6 @@ export default function App() {
           </p>
         </section>
 
-        {/* Acordeón de Instrucciones */}
         <div className="bg-blue-50/60 border border-blue-100 rounded-2xl p-5 transition-all">
           <button
             onClick={() => setMostrarInstrucciones(!mostrarInstrucciones)}
@@ -999,614 +1087,628 @@ export default function App() {
             </div>
           )}
         </div>
+      </div>
 
-        {/* Datos de la empresa + panel de empresas guardadas */}
-        <section className="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-5 items-start">
-          <div className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-xs space-y-5">
-            <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2 uppercase tracking-wider">
-              <Building2 className="w-4 h-4 text-[#003B7A]" />
-              Empresa
-              {cargandoEmpresaSeleccionada && <Loader2 className="w-3.5 h-3.5 text-slate-400 animate-spin" />}
-            </h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700">Nombre corto de la empresa</label>
-                <input
-                  type="text"
-                  placeholder="Ej. CIPY S.A.S."
-                  value={nombreEmpresa}
-                  onChange={(e) => setNombreEmpresa(e.target.value)}
-                  onBlur={() => cargarEmpresaDesdeServidor()}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-                />
-                <p className="text-[11px] text-slate-400">
-                  Al salir del campo, si ya existe en el servidor se carga automáticamente. Se usa en el nombre del archivo y como llave para recordar la configuración de esta empresa.
-                </p>
+      {/* Cuerpo principal: barra de pasos fija a la izquierda + contenido */}
+      <main className="max-w-6xl mx-auto px-6 py-10 grid grid-cols-1 lg:grid-cols-[224px_1fr] gap-8 items-start">
+        <BarraDePasos pasos={pasos} pasoActivo={pasos.find((p) => !p.completo)?.id ?? pasos[pasos.length - 1].id} />
+
+        <div className="space-y-8 min-w-0">
+          {/* PASO 1 — Datos de la empresa + panel de empresas guardadas */}
+          <section id="seccion-empresa" className="grid grid-cols-1 xl:grid-cols-[1fr_280px] gap-5 items-start">
+            <div className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-xs space-y-5">
+              <EncabezadoSeccion
+                numero={1}
+                icono={Building2}
+                titulo="Empresa y configuración general"
+                descripcion="Identifica la empresa y define la jornada y la base de días que se usarán en todos los cálculos."
+                extra={cargandoEmpresaSeleccionada && <Loader2 className="w-3.5 h-3.5 text-slate-400 animate-spin" />}
+              />
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700">Nombre corto de la empresa</label>
+                  <input
+                    type="text"
+                    placeholder="Ej. CIPY S.A.S."
+                    value={nombreEmpresa}
+                    onChange={(e) => setNombreEmpresa(e.target.value)}
+                    onBlur={() => cargarEmpresaDesdeServidor()}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+                  />
+                  <p className="text-[11px] text-slate-400">
+                    Al salir del campo, si ya existe en el servidor se carga automáticamente. Se usa en el nombre del archivo y como llave para recordar la configuración de esta empresa.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-slate-500" /> Jornada semanal de la empresa
+                  </label>
+                  <select
+                    value={jornadaEmpresa}
+                    onChange={(e) => cambiarJornadaEmpresa(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+                  >
+                    <option value="auto">Legal vigente según el mes (automática)</option>
+                    {JORNADAS.map((h) => (
+                      <option key={h} value={h}>
+                        {h} horas fijas para todos los meses
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-400">Puedes ajustarla mes a mes más abajo; esos ajustes se conservan aunque cambies este valor.</p>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-slate-500" /> Base de días para ingresos/retiros
+                  </label>
+                  <select
+                    value={baseDias}
+                    onChange={(e) => actualizarBaseDias(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+                  >
+                    <option value="real">Días reales del mes (28 a 31)</option>
+                    <option value="30">30 días (como Seguridad Social)</option>
+                  </select>
+                  <p className="text-[11px] text-slate-400">Cambia la proporción de quien entra o sale a mitad de mes. Confirma el criterio con tus abogados.</p>
+                </div>
               </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                  <Clock className="w-3.5 h-3.5 text-slate-500" /> Jornada semanal de la empresa
-                </label>
+
+              <div className="pt-4 border-t border-slate-100 space-y-3">
+                <p className="text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">Datos para el encabezado del Excel (opcional pero recomendado)</p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {[
+                    ["razonSocial", "Razón social"],
+                    ["nit", "NIT"],
+                    ["representanteLegal", "Representante legal"],
+                    ["cc", "CC representante legal"],
+                    ["direccion", "Dirección"],
+                    ["telefonos", "Teléfonos"],
+                    ["email", "E-mail"],
+                  ].map(([campo, etiqueta]) => (
+                    <div key={campo} className="space-y-1">
+                      <label className="text-[11px] font-bold text-slate-600">{etiqueta}</label>
+                      <input
+                        type="text"
+                        value={datosEmpresa[campo]}
+                        onChange={(e) => actualizarDatosEmpresa(campo, e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <PanelEmpresas
+              empresas={empresasGuardadas}
+              cargandoLista={cargandoListaEmpresas}
+              cargandoSeleccion={cargandoEmpresaSeleccionada}
+              guardando={guardandoEmpresa}
+              error={errorEmpresas}
+              nombreActual={nombreEmpresa}
+              onRecargar={cargarListaEmpresas}
+              onCargar={cargarEmpresaDesdeServidor}
+              onEliminar={eliminarEmpresaGuardada}
+              onGuardar={guardarEmpresaCompleta}
+            />
+          </section>
+
+          {/* PASO 2 — Carga de Meses */}
+          <section id="seccion-meses" className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-xs space-y-6">
+            <EncabezadoSeccion
+              numero={2}
+              icono={Calendar}
+              titulo="Periodo y archivos mensuales"
+              descripcion="Elige el mes de presentación y sube la nómina y la Seguridad Social de cada uno de los 6 meses anteriores."
+              extra={<span className="text-xs text-slate-400 font-medium">{mesesListos} de 6 meses con archivos completos</span>}
+            />
+
+            {/* Periodo de presentación */}
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end bg-slate-50/70 border border-slate-200/70 rounded-xl p-4">
+              <div className="md:col-span-4 space-y-1.5">
+                <label className="text-[11px] uppercase font-extrabold text-slate-500 tracking-wider">Mes de presentación</label>
                 <select
-                  value={jornadaEmpresa}
-                  onChange={(e) => cambiarJornadaEmpresa(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+                  value={periodo.mes}
+                  onChange={(e) => cambiarPeriodo(Number(e.target.value), periodo.anio)}
+                  className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
                 >
-                  <option value="auto">Legal vigente según el mes (automática)</option>
-                  {JORNADAS.map((h) => (
-                    <option key={h} value={h}>
-                      {h} horas fijas para todos los meses
+                  {NOMBRES_MES.map((nombre, i) => (
+                    <option key={nombre} value={i}>
+                      {nombre}
+                      {MESES_PERIODO_SENA.includes(i) ? " (periodo SENA)" : ""}
                     </option>
                   ))}
                 </select>
-                <p className="text-[11px] text-slate-400">Puedes ajustarla mes a mes más abajo; esos ajustes se conservan aunque cambies este valor.</p>
               </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                  <Calendar className="w-3.5 h-3.5 text-slate-500" /> Base de días para ingresos/retiros
-                </label>
-                <select
-                  value={baseDias}
-                  onChange={(e) => actualizarBaseDias(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+              <div className="md:col-span-2 space-y-1.5">
+                <label className="text-[11px] uppercase font-extrabold text-slate-500 tracking-wider">Año</label>
+                <input
+                  type="number"
+                  value={anioTexto}
+                  onChange={(e) => {
+                    setAnioTexto(e.target.value);
+                    cambiarPeriodo(periodo.mes, Number(e.target.value));
+                  }}
+                  className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+                />
+              </div>
+              <p className="md:col-span-6 text-xs text-slate-500 leading-relaxed">
+                Se reportan los 6 meses anteriores: <span className="font-bold text-slate-700">{rangoPeriodo}</span>. Al cambiar el periodo se limpian los archivos cargados.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              {meses.map((mes) => (
+                <div
+                  key={mes.id}
+                  className={`p-4 rounded-xl border transition-all ${
+                    mes.nomina && mes.segSocial ? "bg-slate-50/50 border-slate-200" : "bg-white border-slate-200/70 hover:border-slate-300"
+                  }`}
                 >
-                  <option value="real">Días reales del mes (28 a 31)</option>
-                  <option value="30">30 días (como Seguridad Social)</option>
-                </select>
-                <p className="text-[11px] text-slate-400">Cambia la proporción de quien entra o sale a mitad de mes. Confirma el criterio con tus abogados.</p>
-              </div>
-            </div>
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+                    {/* Mes */}
+                    <div className="md:col-span-3">
+                      <p className="text-sm font-extrabold text-slate-800">{mes.etiqueta}</p>
+                      <p className="text-[11px] text-slate-400">{new Date(mes.anio, mes.mesIndex + 1, 0).getDate()} días</p>
+                      {mes.jornadaDividida && (
+                        <p className="text-[10px] text-amber-700 font-semibold mt-0.5">⚠ Jornada cambia el día {mes.jornadaDividida.diaCambio}</p>
+                      )}
+                    </div>
 
-            <div className="pt-4 border-t border-slate-100 space-y-3">
-              <p className="text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">Datos para el encabezado del Excel (opcional pero recomendado)</p>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {[
-                  ["razonSocial", "Razón social"],
-                  ["nit", "NIT"],
-                  ["representanteLegal", "Representante legal"],
-                  ["cc", "CC representante legal"],
-                  ["direccion", "Dirección"],
-                  ["telefonos", "Teléfonos"],
-                  ["email", "E-mail"],
-                ].map(([campo, etiqueta]) => (
-                  <div key={campo} className="space-y-1">
-                    <label className="text-[11px] font-bold text-slate-600">{etiqueta}</label>
-                    <input
-                      type="text"
-                      value={datosEmpresa[campo]}
-                      onChange={(e) => actualizarDatosEmpresa(campo, e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
+                    {/* Carga Archivo Nómina */}
+                    <div className="md:col-span-3 space-y-1.5">
+                      <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" /> Nómina
+                      </label>
+                      <label
+                        className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs cursor-pointer transition ${
+                          mes.nomina ? "bg-emerald-50/50 border-emerald-200 text-emerald-800" : "bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100/80"
+                        }`}
+                      >
+                        <span className="truncate max-w-[140px]">{mes.nomina ? mes.nomina.name : "Seleccionar..."}</span>
+                        <Upload className="w-3.5 h-3.5 shrink-0 opacity-60" />
+                        <input
+                          type="file"
+                          accept=".xlsx,.xls,.csv"
+                          onChange={(e) => actualizarMes(mes.id, "nomina", e.target.files?.[0] || null)}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
 
-          <PanelEmpresas
-            empresas={empresasGuardadas}
-            cargandoLista={cargandoListaEmpresas}
-            cargandoSeleccion={cargandoEmpresaSeleccionada}
-            guardando={guardandoEmpresa}
-            error={errorEmpresas}
-            nombreActual={nombreEmpresa}
-            onRecargar={cargarListaEmpresas}
-            onCargar={cargarEmpresaDesdeServidor}
-            onEliminar={eliminarEmpresaGuardada}
-            onGuardar={guardarEmpresaCompleta}
-          />
-        </section>
+                    {/* Carga Archivo Seg Social */}
+                    <div className="md:col-span-3 space-y-1.5">
+                      <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                        <FileText className="w-3.5 h-3.5 text-blue-600" /> Seguridad Social
+                      </label>
+                      <label
+                        className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs cursor-pointer transition ${
+                          mes.segSocial ? "bg-blue-50/50 border-blue-200 text-blue-800" : "bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100/80"
+                        }`}
+                      >
+                        <span className="truncate max-w-[140px]">{mes.segSocial ? mes.segSocial.name : "Seleccionar..."}</span>
+                        <Upload className="w-3.5 h-3.5 shrink-0 opacity-60" />
+                        <input
+                          type="file"
+                          accept=".xlsx,.xls,.csv"
+                          onChange={(e) => actualizarMes(mes.id, "segSocial", e.target.files?.[0] || null)}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
 
-        {/* Sección de Carga de Meses */}
-        <section className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-xs space-y-6">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
-            <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2 uppercase tracking-wider">
-              <Calendar className="w-4 h-4 text-[#003B7A]" />
-              Meses a reportar
-            </h2>
-            <span className="text-xs text-slate-400 font-medium">
-              {mesesListos} de 6 meses con archivos completos
-            </span>
-          </div>
+                    {/* Jornada semanal por periodo */}
+                    <div className="md:col-span-2 space-y-1.5">
+                      <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                        <Clock className="w-3.5 h-3.5 text-slate-500" /> Jornada
+                      </label>
+                      <select
+                        value={mes.jornadaSemanal}
+                        onChange={(e) => actualizarMes(mes.id, "jornadaSemanal", Number(e.target.value))}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+                      >
+                        {[...new Set([...JORNADAS, mes.jornadaSemanal])]
+                          .sort((a, b) => a - b)
+                          .map((h) => (
+                            <option key={h} value={h}>
+                              {h}h
+                            </option>
+                          ))}
+                      </select>
+                    </div>
 
-          {/* Periodo de presentación */}
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end bg-slate-50/70 border border-slate-200/70 rounded-xl p-4">
-            <div className="md:col-span-4 space-y-1.5">
-              <label className="text-[11px] uppercase font-extrabold text-slate-500 tracking-wider">Mes de presentación</label>
-              <select
-                value={periodo.mes}
-                onChange={(e) => cambiarPeriodo(Number(e.target.value), periodo.anio)}
-                className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-              >
-                {NOMBRES_MES.map((nombre, i) => (
-                  <option key={nombre} value={i}>
-                    {nombre}
-                    {MESES_PERIODO_SENA.includes(i) ? " (periodo SENA)" : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="md:col-span-2 space-y-1.5">
-              <label className="text-[11px] uppercase font-extrabold text-slate-500 tracking-wider">Año</label>
-              <input
-                type="number"
-                value={anioTexto}
-                onChange={(e) => {
-                  setAnioTexto(e.target.value);
-                  cambiarPeriodo(periodo.mes, Number(e.target.value));
-                }}
-                className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-              />
-            </div>
-            <p className="md:col-span-6 text-xs text-slate-500 leading-relaxed">
-              Se reportan los 6 meses anteriores: <span className="font-bold text-slate-700">{rangoPeriodo}</span>. Al cambiar el periodo se limpian los archivos cargados.
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            {meses.map((mes) => (
-              <div
-                key={mes.id}
-                className={`p-4 rounded-xl border transition-all ${
-                  mes.nomina && mes.segSocial ? "bg-slate-50/50 border-slate-200" : "bg-white border-slate-200/70 hover:border-slate-300"
-                }`}
-              >
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
-                  {/* Mes */}
-                  <div className="md:col-span-3">
-                    <p className="text-sm font-extrabold text-slate-800">{mes.etiqueta}</p>
-                    <p className="text-[11px] text-slate-400">{new Date(mes.anio, mes.mesIndex + 1, 0).getDate()} días</p>
-                    {mes.jornadaDividida && (
-                      <p className="text-[10px] text-amber-700 font-semibold mt-0.5">⚠ Jornada cambia el día {mes.jornadaDividida.diaCambio}</p>
-                    )}
-                  </div>
-
-                  {/* Carga Archivo Nómina */}
-                  <div className="md:col-span-3 space-y-1.5">
-                    <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
-                      <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" /> Nómina
-                    </label>
-                    <label
-                      className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs cursor-pointer transition ${
-                        mes.nomina ? "bg-emerald-50/50 border-emerald-200 text-emerald-800" : "bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100/80"
-                      }`}
-                    >
-                      <span className="truncate max-w-[140px]">{mes.nomina ? mes.nomina.name : "Seleccionar..."}</span>
-                      <Upload className="w-3.5 h-3.5 shrink-0 opacity-60" />
-                      <input
-                        type="file"
-                        accept=".xlsx,.xls,.csv"
-                        onChange={(e) => actualizarMes(mes.id, "nomina", e.target.files?.[0] || null)}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
-
-                  {/* Carga Archivo Seg Social */}
-                  <div className="md:col-span-3 space-y-1.5">
-                    <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
-                      <FileText className="w-3.5 h-3.5 text-blue-600" /> Seguridad Social
-                    </label>
-                    <label
-                      className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs cursor-pointer transition ${
-                        mes.segSocial ? "bg-blue-50/50 border-blue-200 text-blue-800" : "bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100/80"
-                      }`}
-                    >
-                      <span className="truncate max-w-[140px]">{mes.segSocial ? mes.segSocial.name : "Seleccionar..."}</span>
-                      <Upload className="w-3.5 h-3.5 shrink-0 opacity-60" />
-                      <input
-                        type="file"
-                        accept=".xlsx,.xls,.csv"
-                        onChange={(e) => actualizarMes(mes.id, "segSocial", e.target.files?.[0] || null)}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
-
-                  {/* Jornada semanal por periodo */}
-                  <div className="md:col-span-2 space-y-1.5">
-                    <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
-                      <Clock className="w-3.5 h-3.5 text-slate-500" /> Jornada
-                    </label>
-                    <select
-                      value={mes.jornadaSemanal}
-                      onChange={(e) => actualizarMes(mes.id, "jornadaSemanal", Number(e.target.value))}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-                    >
-                      {[...new Set([...JORNADAS, mes.jornadaSemanal])]
-                        .sort((a, b) => a - b)
-                        .map((h) => (
-                          <option key={h} value={h}>
-                            {h}h
-                          </option>
-                        ))}
-                    </select>
-                  </div>
-
-                  {/* Estado */}
-                  <div className="md:col-span-1 flex md:justify-end items-center">
-                    {mes.nomina && mes.segSocial ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                        <Check className="w-3 h-3 stroke-[3]" />
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium bg-slate-100 text-slate-400">—</span>
-                    )}
+                    {/* Estado */}
+                    <div className="md:col-span-1 flex md:justify-end items-center">
+                      {mes.nomina && mes.segSocial ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                          <Check className="w-3 h-3 stroke-[3]" />
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium bg-slate-100 text-slate-400">—</span>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Configuración de aprendices */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-slate-100">
-            <div className="space-y-1.5">
-              <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                <Users className="w-4 h-4 text-slate-500" /> Aprendices activos actualmente:
-              </label>
-              <input
-                type="number"
-                min="0"
-                value={aprendicesActivos}
-                onChange={(e) => setAprendicesActivos(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
-              />
-              <p className="text-[11px] text-slate-400">Se compara con la cuota del último mes procesado: {TEXTO_REGLA_CUOTA_APRENDICES} Confírmalo con tus abogados.</p>
+              ))}
             </div>
-            {cuotaVigente !== null && (
-              <div
-                className={`rounded-xl border p-4 flex items-center gap-3 text-xs font-bold ${
-                  aprendicesNum >= cuotaVigente ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-amber-50 border-amber-200 text-amber-800"
-                }`}
-              >
-                {aprendicesNum >= cuotaVigente ? <CheckCircle2 className="w-5 h-5 shrink-0" /> : <AlertTriangle className="w-5 h-5 shrink-0" />}
-                <span>
-                  Cuota requerida ({resultadoMasReciente.etiqueta}): {cuotaVigente} aprendiz(es). Actualmente reportas {aprendicesNum}.
-                  {aprendicesNum < cuotaVigente ? " Faltan por cubrir." : " Cuota cubierta."}
-                </span>
+
+            {/* Configuración de aprendices */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-slate-100">
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                  <Users className="w-4 h-4 text-slate-500" /> Aprendices activos actualmente:
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={aprendicesActivos}
+                  onChange={(e) => setAprendicesActivos(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-[#003B7A]/20 focus:border-[#003B7A]"
+                />
+                <p className="text-[11px] text-slate-400">Se compara con la cuota del último mes procesado: {TEXTO_REGLA_CUOTA_APRENDICES} Confírmalo con tus abogados.</p>
+              </div>
+              {cuotaVigente !== null && (
+                <div
+                  className={`rounded-xl border p-4 flex items-center gap-3 text-xs font-bold ${
+                    aprendicesNum >= cuotaVigente ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-amber-50 border-amber-200 text-amber-800"
+                  }`}
+                >
+                  {aprendicesNum >= cuotaVigente ? <CheckCircle2 className="w-5 h-5 shrink-0" /> : <AlertTriangle className="w-5 h-5 shrink-0" />}
+                  <span>
+                    Cuota requerida ({resultadoMasReciente.etiqueta}): {cuotaVigente} aprendiz(es). Actualmente reportas {aprendicesNum}.
+                    {aprendicesNum < cuotaVigente ? " Faltan por cubrir." : " Cuota cubierta."}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {necesitaReprocesar && (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs font-semibold text-amber-800 flex items-center gap-2">
+                <RefreshCw className="w-4 h-4 shrink-0" /> Cambiaste algo después de procesar (jornada, base de días, archivos). Vuelve a procesar para que la matriz refleje el cambio.
               </div>
             )}
-          </div>
 
-          {necesitaReprocesar && (
-            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs font-semibold text-amber-800 flex items-center gap-2">
-              <RefreshCw className="w-4 h-4 shrink-0" /> Cambiaste algo después de procesar (jornada, base de días, archivos). Vuelve a procesar para que la matriz refleje el cambio.
+            <button
+              onClick={procesarTodosLosMeses}
+              disabled={cargando}
+              className="w-full bg-[#003B7A] hover:bg-[#002B5B] disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3.5 rounded-xl transition-all shadow-md hover:shadow-lg disabled:shadow-none text-sm flex items-center justify-center gap-2 cursor-pointer"
+            >
+              {cargando ? (
+                <>
+                  <Sparkles className="w-4 h-4 animate-spin text-amber-300" /> Procesando y traduciendo cargos...
+                </>
+              ) : listaResultados.length > 0 ? (
+                <>
+                  <RefreshCw className="w-4 h-4 text-blue-200" /> Reprocesar todos los meses
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-4 h-4 text-blue-200" /> Procesar todos los meses
+                </>
+              )}
+            </button>
+          </section>
+
+          {/* Notificaciones */}
+          {error && (
+            <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs font-semibold flex items-center gap-3 shadow-2xs">
+              <AlertTriangle className="w-5 h-5 shrink-0 text-rose-600" />
+              <p>{error}</p>
+            </div>
+          )}
+          {avisos.length > 0 && (
+            <div className="p-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs font-medium flex items-start gap-3 shadow-2xs">
+              <AlertTriangle className="w-5 h-5 shrink-0 text-amber-600" />
+              <ul className="space-y-1 list-disc pl-4">
+                {avisos.map((a, i) => (
+                  <li key={i}>{a}</li>
+                ))}
+              </ul>
             </div>
           )}
 
-          <button
-            onClick={procesarTodosLosMeses}
-            disabled={cargando}
-            className="w-full bg-[#003B7A] hover:bg-[#002B5B] disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold py-3.5 rounded-xl transition-all shadow-md hover:shadow-lg disabled:shadow-none text-sm flex items-center justify-center gap-2 cursor-pointer"
-          >
-            {cargando ? (
-              <>
-                <Sparkles className="w-4 h-4 animate-spin text-amber-300" /> Procesando y traduciendo cargos...
-              </>
-            ) : listaResultados.length > 0 ? (
-              <>
-                <RefreshCw className="w-4 h-4 text-blue-200" /> Reprocesar todos los meses
-              </>
-            ) : (
-              <>
-                <Sparkles className="w-4 h-4 text-blue-200" /> Procesar todos los meses
-              </>
-            )}
-          </button>
-        </section>
-
-        {/* Notificaciones */}
-        {error && (
-          <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs font-semibold flex items-center gap-3 shadow-2xs">
-            <AlertTriangle className="w-5 h-5 shrink-0 text-rose-600" />
-            <p>{error}</p>
-          </div>
-        )}
-        {avisos.length > 0 && (
-          <div className="p-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs font-medium flex items-start gap-3 shadow-2xs">
-            <AlertTriangle className="w-5 h-5 shrink-0 text-amber-600" />
-            <ul className="space-y-1 list-disc pl-4">
-              {avisos.map((a, i) => (
-                <li key={i}>{a}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Corrección manual: personas de SS sin cargo en ninguna nómina */}
-        {pendientesAsignacionGlobal.length > 0 && (
-          <section className="bg-white border border-amber-200 rounded-2xl shadow-xs overflow-hidden">
-            <div className="p-5 border-b border-amber-100 bg-amber-50/60">
-              <h2 className="font-bold text-amber-900 text-base flex items-center gap-2">
-                <Wrench className="w-4 h-4" /> Corrección manual: {pendientesAsignacionGlobal.length} persona(s) sin cargo conocido
-              </h2>
-              <p className="text-[11px] text-amber-800/80 mt-1">
-                Están en Seguridad Social pero no aparecen en la nómina de ningún mes cargado. Escribe su cargo (o carga la nómina del mes en que sí estaban activos) y vuelve a procesar.
-              </p>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-100/70 text-[10px] uppercase text-slate-500">
-                  <tr>
-                    <th className="py-2 px-3">Documento</th>
-                    <th className="py-2 px-3">Meses afectados</th>
-                    <th className="py-2 px-3 min-w-[260px]">Cargo (a mano)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {pendientesAsignacionGlobal.map((p) => (
-                    <tr key={p.documento}>
-                      <td className="py-2 px-3 font-mono text-slate-600">{p.documento}</td>
-                      <td className="py-2 px-3 text-slate-500">{p.meses.join(", ")}</td>
-                      <td className="py-2 px-3">
-                        <input
-                          type="text"
-                          value={asignacionesManuales[p.documento] || ""}
-                          onChange={(e) => actualizarAsignacionManual(p.documento, e.target.value)}
-                          placeholder="Escribe el cargo…"
-                          className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-medium text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-amber-300 focus:border-amber-400"
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="p-4 flex justify-end">
-              <button
-                onClick={procesarTodosLosMeses}
-                className="text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 px-4 py-2 rounded-lg cursor-pointer flex items-center gap-2"
-              >
-                <RefreshCw className="w-3.5 h-3.5" /> Aplicar y reprocesar
-              </button>
-            </div>
-          </section>
-        )}
-
-        {/* Resultados */}
-        {listaResultados.length > 0 && (
-          <>
-            {/* Homologación por cargo */}
-            <section className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
-              <div className="p-5 border-b border-slate-100 bg-slate-50/50 flex flex-wrap items-center justify-between gap-3">
-                <div className="space-y-1">
-                  <h2 className="font-bold text-slate-900 text-base flex items-center gap-2">
-                    <ListChecks className="w-4 h-4 text-[#003B7A]" /> Homologación de cargos
-                  </h2>
-                  <p className="text-[11px] text-slate-500">
-                    Se aprueba una sola vez y aplica a todos los meses. Las sugerencias vienen de la traducción y del listado oficial; revísalas antes de confirmar.
-                  </p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span
-                    className={`text-[11px] font-bold px-2.5 py-1 rounded-full border ${
-                      pendientes === 0 ? "bg-emerald-50 text-emerald-800 border-emerald-200" : "bg-amber-50 text-amber-800 border-amber-200"
-                    }`}
-                  >
-                    {pendientes === 0 ? "Todos confirmados" : `${pendientes} por confirmar`}
-                  </span>
-                  {pendientes > 0 && (
-                    <button
-                      onClick={confirmarTodas}
-                      className="text-[11px] font-bold text-white bg-[#003B7A] hover:bg-[#002B5B] px-3 py-1.5 rounded-lg cursor-pointer"
-                    >
-                      Confirmar todos (excepto baja cobertura)
-                    </button>
-                  )}
-                </div>
+          {/* Corrección manual: personas de SS sin cargo en ninguna nómina */}
+          {pendientesAsignacionGlobal.length > 0 && (
+            <section className="bg-white border border-amber-200 rounded-2xl shadow-xs overflow-hidden">
+              <div className="p-5 border-b border-amber-100 bg-amber-50/60">
+                <h2 className="font-bold text-amber-900 text-base flex items-center gap-2">
+                  <Wrench className="w-4 h-4" /> Corrección manual: {pendientesAsignacionGlobal.length} persona(s) sin cargo conocido
+                </h2>
+                <p className="text-[11px] text-amber-800/80 mt-1">
+                  Están en Seguridad Social pero no aparecen en la nómina de ningún mes cargado. Escribe su cargo (o carga la nómina del mes en que sí estaban activos) y vuelve a procesar.
+                </p>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-100/70 text-slate-500 uppercase text-[10px] font-extrabold tracking-wider border-b border-slate-200">
+                  <thead className="bg-slate-100/70 text-[10px] uppercase text-slate-500">
                     <tr>
-                      <th className="py-3 px-3">Cargo original</th>
-                      <th className="py-3 px-3 min-w-[200px]">Cargo en español</th>
-                      <th className="py-3 px-3 min-w-[240px]">Código CNO</th>
-                      <th className="py-3 px-3 text-center">Personas</th>
-                      <th className="py-3 px-3">Acción</th>
+                      <th className="py-2 px-3">Documento</th>
+                      <th className="py-2 px-3">Meses afectados</th>
+                      <th className="py-2 px-3 min-w-[260px]">Cargo (a mano)</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 text-slate-700">
-                    {homologacionOrdenada.map(([clave, h]) => (
-                      <FilaHomologacion key={clave} clave={clave} h={h} cantidad={cantidadPorCargo[clave] || 0} onCambiar={aplicarCambioHomologacion} />
+                  <tbody className="divide-y divide-slate-100">
+                    {pendientesAsignacionGlobal.map((p) => (
+                      <tr key={p.documento}>
+                        <td className="py-2 px-3 font-mono text-slate-600">{p.documento}</td>
+                        <td className="py-2 px-3 text-slate-500">{p.meses.join(", ")}</td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="text"
+                            value={asignacionesManuales[p.documento] || ""}
+                            onChange={(e) => actualizarAsignacionManual(p.documento, e.target.value)}
+                            placeholder="Escribe el cargo…"
+                            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-medium text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-amber-300 focus:border-amber-400"
+                          />
+                        </td>
+                      </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-            </section>
-
-            {/* Detalle por mes */}
-            <section className="space-y-4">
-              <div className="flex gap-2 flex-wrap border-b border-slate-200/80 pb-2">
-                {listaResultados.map((r) => (
-                  <button
-                    key={r.etiqueta}
-                    onClick={() => setMesActivo(r.etiqueta)}
-                    className={`px-4 py-2 rounded-xl text-xs font-bold border transition-all flex items-center gap-2 cursor-pointer ${
-                      mesActivo === r.etiqueta ? "bg-[#003B7A] text-white border-[#003B7A] shadow-xs" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
-                    }`}
-                  >
-                    {r.etiqueta}
-                    {r.cuadra ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />}
-                  </button>
-                ))}
-              </div>
-
-              {resultadoActivo && (
-                <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
-                  <div className="p-5 border-b border-slate-100 space-y-2 bg-slate-50/50">
-                    <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
-                      {nombreEmpresa ? `${nombreEmpresa} — ` : ""}
-                      {mesActivo}
-                      <span className="text-[11px] font-semibold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
-                        Jornada: {resultadoActivo.jornadaSemanal}h
-                      </span>
-                    </h3>
-                    <div className="flex flex-wrap gap-2">
-                      {resultadoActivo.cuadra ? (
-                        <div className="inline-flex items-center gap-2 text-xs text-emerald-800 font-bold bg-emerald-50 border border-emerald-200/60 px-3 py-1 rounded-md">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Nómina ({resultadoActivo.totalNomina}) coincide con Seguridad Social ({resultadoActivo.totalSegSocial})
-                        </div>
-                      ) : (
-                        <div className="inline-flex items-center gap-2 text-xs text-rose-800 font-bold bg-rose-50 border border-rose-200/60 px-3 py-1 rounded-md">
-                          <AlertTriangle className="w-4 h-4 text-rose-600" /> Discrepancia: Nómina ({resultadoActivo.totalNomina}) vs Seguridad Social ({resultadoActivo.totalSegSocial})
-                        </div>
-                      )}
-                      <div className="inline-flex items-center gap-2 text-xs text-slate-600 font-semibold bg-slate-100 border border-slate-200/60 px-3 py-1 rounded-md">
-                        <Briefcase className="w-4 h-4 text-slate-500" /> Cuota de aprendices requerida este mes: {resultadoActivo.cuotaAprendicesRequerida}
-                      </div>
-                      {resultadoActivo.fueraDelMes > 0 && (
-                        <div className="inline-flex items-center text-xs text-slate-600 font-semibold bg-slate-100 border border-slate-200/60 px-3 py-1 rounded-md">
-                          {resultadoActivo.fueraDelMes} fila(s) de nómina fuera del mes por fechas
-                        </div>
-                      )}
-                      {resultadoActivo.diferenciasProporcion?.length > 0 && (
-                        <div className="inline-flex items-center text-xs text-amber-700 font-semibold bg-amber-50 border border-amber-200/60 px-3 py-1 rounded-md">
-                          {resultadoActivo.diferenciasProporcion.length} persona(s) con diferencia entre proporción por fechas y por horas SS
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Resumen por cargo: lo que se va a exportar */}
-                  <div className="border-b border-slate-100 px-5 py-4">
-                    <p className="text-[11px] font-extrabold text-slate-500 uppercase tracking-wider mb-2">Resumen por cargo (lo que se exportará)</p>
-                    <ResumenPorCargo grupos={grupoActivoResumen} />
-                  </div>
-
-                  {/* Cruce con Seguridad Social */}
-                  {(resultadoActivo.sinMatchSS.length > 0 || resultadoActivo.soloEnSS.length > 0) && (
-                    <details open={!resultadoActivo.cuadra} className="border-b border-slate-100 px-5 py-3 text-xs">
-                      <summary className="font-bold text-slate-700 cursor-pointer">
-                        Diferencias con Seguridad Social ({resultadoActivo.sinMatchSS.length} en nómina sin planilla · {resultadoActivo.soloEnSS.length} en planilla sin nómina)
-                      </summary>
-                      <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-5">
-                        <div className="space-y-2">
-                          <p className="font-bold text-slate-600">En nómina, pero no en Seguridad Social</p>
-                          {resultadoActivo.sinMatchSS.length === 0 ? (
-                            <p className="text-slate-400">Ninguno.</p>
-                          ) : (
-                            <div className="max-h-56 overflow-y-auto rounded-lg border border-slate-200">
-                              <table className="w-full text-left">
-                                <thead className="bg-slate-100/70 text-[10px] uppercase text-slate-500 sticky top-0">
-                                  <tr>
-                                    <th className="py-2 px-3">Documento</th>
-                                    <th className="py-2 px-3">Empleado</th>
-                                    <th className="py-2 px-3">Ingreso</th>
-                                    <th className="py-2 px-3">Retiro</th>
-                                    <th className="py-2 px-3">Posible causa</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                  {resultadoActivo.sinMatchSS.map((e) => (
-                                    <tr key={e.documento}>
-                                      <td className="py-2 px-3 font-mono text-slate-500">{e.documentoOriginal || e.documento}</td>
-                                      <td className="py-2 px-3 font-semibold text-slate-800">{e.nombre}</td>
-                                      <td className="py-2 px-3">{formatFecha(e.fechaIngreso) || "—"}</td>
-                                      <td className="py-2 px-3">{formatFecha(e.fechaRetiro) || "—"}</td>
-                                      <td className="py-2 px-3 text-amber-700">{e.novedad || "Revisar"}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                        </div>
-                        <div className="space-y-2">
-                          <p className="font-bold text-slate-600">En Seguridad Social, pero no en nómina</p>
-                          {resultadoActivo.soloEnSS.length === 0 ? (
-                            <p className="text-slate-400">Ninguno.</p>
-                          ) : (
-                            <div className="max-h-56 overflow-y-auto rounded-lg border border-slate-200">
-                              <table className="w-full text-left">
-                                <thead className="bg-slate-100/70 text-[10px] uppercase text-slate-500 sticky top-0">
-                                  <tr>
-                                    <th className="py-2 px-3">Documento</th>
-                                    <th className="py-2 px-3">Nota</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                  {resultadoActivo.soloEnSS.map((e) => (
-                                    <tr key={e.documento}>
-                                      <td className="py-2 px-3 font-mono text-slate-500">{e.documento}</td>
-                                      <td className="py-2 px-3 text-amber-700">{e.nota || "No aparece en la nómina de este mes."}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </details>
-                  )}
-
-                  <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead className="bg-slate-100/70 text-slate-500 uppercase text-[10px] font-extrabold tracking-wider border-b border-slate-200 sticky top-0">
-                        <tr>
-                          <th className="py-3 px-4">Documento</th>
-                          <th className="py-3 px-4">Empleado</th>
-                          <th className="py-3 px-4">Cargo (original)</th>
-                          <th className="py-3 px-4">Cargo (español)</th>
-                          <th className="py-3 px-4">Proporción mes</th>
-                          <th className="py-3 px-4">CNO</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 text-slate-700">
-                        {resultadoActivo.empleados.map((emp) => {
-                          const h = homologacion[emp.cargoKey];
-                          return (
-                            <tr key={emp.documento} className="hover:bg-slate-50/80 transition-colors">
-                              <td className="py-3 px-4 font-mono text-slate-500">
-                                {emp.documentoOriginal || emp.documento}
-                                {emp.agregadoDesdeSS && <span className="ml-1 text-[9px] text-blue-600 font-bold" title={emp.novedad}>SS</span>}
-                              </td>
-                              <td className="py-3 px-4 font-bold text-slate-900">{emp.nombre}</td>
-                              <td className="py-3 px-4 text-slate-400">{emp.cargo}</td>
-                              <td className="py-3 px-4 text-slate-700 font-medium">{h?.es || emp.cargo}</td>
-                              <td className="py-3 px-4 font-semibold">
-                                {emp.trabajoCompleto ? (
-                                  <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/50">
-                                    <CheckCircle2 className="w-3 h-3" /> Completo
-                                  </span>
-                                ) : (
-                                  <span
-                                    title={emp.novedad}
-                                    className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200/50"
-                                  >
-                                    {emp.proporcion.toFixed(2)}
-                                  </span>
-                                )}
-                              </td>
-                              <td className="py-3 px-4">
-                                {h?.codigo ? (
-                                  <span className={`font-mono font-bold ${h.confirmado ? "text-[#003B7A]" : "text-amber-700"}`}>{h.codigo}</span>
-                                ) : (
-                                  <span className="text-slate-400">Sin código</span>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              <div className="flex justify-end pt-2">
+              <div className="p-4 flex justify-end">
                 <button
-                  onClick={exportarMatrizCompleta}
-                  disabled={exportando}
-                  className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-xs font-bold px-6 py-3.5 rounded-xl transition shadow-md hover:shadow-lg disabled:shadow-none flex items-center gap-2 cursor-pointer"
+                  onClick={procesarTodosLosMeses}
+                  className="text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 px-4 py-2 rounded-lg cursor-pointer flex items-center gap-2"
                 >
-                  <Download className="w-4 h-4" /> {exportando ? "Generando Excel..." : "Exportar Matriz SENA completa (.xlsx)"}
+                  <RefreshCw className="w-3.5 h-3.5" /> Aplicar y reprocesar
                 </button>
               </div>
             </section>
-          </>
-        )}
+          )}
+
+          {/* Resultados */}
+          {listaResultados.length > 0 && (
+            <>
+              {/* PASO 3 — Homologación por cargo */}
+              <section id="seccion-homologacion" className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
+                <div className="p-5 border-b border-slate-100 bg-slate-50/50">
+                  <EncabezadoSeccion
+                    numero={3}
+                    icono={ListChecks}
+                    titulo="Homologación de cargos"
+                    descripcion="Se aprueba una sola vez y aplica a todos los meses. Revisa cada sugerencia antes de confirmar."
+                    extra={
+                      <div className="flex items-center gap-3">
+                        <span
+                          className={`text-[11px] font-bold px-2.5 py-1 rounded-full border ${
+                            pendientes === 0 ? "bg-emerald-50 text-emerald-800 border-emerald-200" : "bg-amber-50 text-amber-800 border-amber-200"
+                          }`}
+                        >
+                          {pendientes === 0 ? "Todos confirmados" : `${pendientes} por confirmar`}
+                        </span>
+                        {pendientes > 0 && (
+                          <button
+                            onClick={confirmarTodas}
+                            className="text-[11px] font-bold text-white bg-[#003B7A] hover:bg-[#002B5B] px-3 py-1.5 rounded-lg cursor-pointer"
+                          >
+                            Confirmar todos (excepto baja cobertura)
+                          </button>
+                        )}
+                      </div>
+                    }
+                  />
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-100/70 text-slate-500 uppercase text-[10px] font-extrabold tracking-wider border-b border-slate-200">
+                      <tr>
+                        <th className="py-3 px-3">Cargo original</th>
+                        <th className="py-3 px-3 min-w-[200px]">Cargo en español</th>
+                        <th className="py-3 px-3 min-w-[240px]">Código CNO</th>
+                        <th className="py-3 px-3 text-center">Personas</th>
+                        <th className="py-3 px-3">Acción</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-slate-700">
+                      {homologacionOrdenada.map(([clave, h]) => (
+                        <FilaHomologacion key={clave} clave={clave} h={h} cantidad={cantidadPorCargo[clave] || 0} onCambiar={aplicarCambioHomologacion} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              {/* PASO 4 — Detalle por mes y exportación */}
+              <section id="seccion-resultados" className="space-y-4">
+                <EncabezadoSeccion
+                  numero={4}
+                  icono={Briefcase}
+                  titulo="Resultados por mes y exportación"
+                  descripcion="Revisa cada mes, resuelve las diferencias con Seguridad Social y exporta la matriz final."
+                />
+
+                <div className="flex gap-2 flex-wrap border-b border-slate-200/80 pb-2">
+                  {listaResultados.map((r) => (
+                    <button
+                      key={r.etiqueta}
+                      onClick={() => setMesActivo(r.etiqueta)}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold border transition-all flex items-center gap-2 cursor-pointer ${
+                        mesActivo === r.etiqueta ? "bg-[#003B7A] text-white border-[#003B7A] shadow-xs" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                      }`}
+                    >
+                      {r.etiqueta}
+                      {r.cuadra ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />}
+                    </button>
+                  ))}
+                </div>
+
+                {resultadoActivo && (
+                  <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden">
+                    <div className="p-5 border-b border-slate-100 space-y-2 bg-slate-50/50">
+                      <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                        {nombreEmpresa ? `${nombreEmpresa} — ` : ""}
+                        {mesActivo}
+                        <span className="text-[11px] font-semibold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+                          Jornada: {resultadoActivo.jornadaSemanal}h
+                        </span>
+                      </h3>
+                      <div className="flex flex-wrap gap-2">
+                        {resultadoActivo.cuadra ? (
+                          <div className="inline-flex items-center gap-2 text-xs text-emerald-800 font-bold bg-emerald-50 border border-emerald-200/60 px-3 py-1 rounded-md">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Nómina ({resultadoActivo.totalNomina}) coincide con Seguridad Social ({resultadoActivo.totalSegSocial})
+                          </div>
+                        ) : (
+                          <div className="inline-flex items-center gap-2 text-xs text-rose-800 font-bold bg-rose-50 border border-rose-200/60 px-3 py-1 rounded-md">
+                            <AlertTriangle className="w-4 h-4 text-rose-600" /> Discrepancia: Nómina ({resultadoActivo.totalNomina}) vs Seguridad Social ({resultadoActivo.totalSegSocial})
+                          </div>
+                        )}
+                        <div className="inline-flex items-center gap-2 text-xs text-slate-600 font-semibold bg-slate-100 border border-slate-200/60 px-3 py-1 rounded-md">
+                          <Briefcase className="w-4 h-4 text-slate-500" /> Cuota de aprendices requerida este mes: {resultadoActivo.cuotaAprendicesRequerida}
+                        </div>
+                        {resultadoActivo.fueraDelMes > 0 && (
+                          <div className="inline-flex items-center text-xs text-slate-600 font-semibold bg-slate-100 border border-slate-200/60 px-3 py-1 rounded-md">
+                            {resultadoActivo.fueraDelMes} fila(s) de nómina fuera del mes por fechas
+                          </div>
+                        )}
+                        {resultadoActivo.diferenciasProporcion?.length > 0 && (
+                          <div className="inline-flex items-center text-xs text-amber-700 font-semibold bg-amber-50 border border-amber-200/60 px-3 py-1 rounded-md">
+                            {resultadoActivo.diferenciasProporcion.length} persona(s) con diferencia entre proporción por fechas y por horas SS
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Resumen por cargo: lo que se va a exportar */}
+                    <div className="border-b border-slate-100 px-5 py-4">
+                      <p className="text-[11px] font-extrabold text-slate-500 uppercase tracking-wider mb-2">Resumen por cargo (lo que se exportará)</p>
+                      <ResumenPorCargo grupos={grupoActivoResumen} />
+                    </div>
+
+                    {/* Cruce con Seguridad Social */}
+                    {(resultadoActivo.sinMatchSS.length > 0 || resultadoActivo.soloEnSS.length > 0) && (
+                      <details open={!resultadoActivo.cuadra} className="border-b border-slate-100 px-5 py-3 text-xs">
+                        <summary className="font-bold text-slate-700 cursor-pointer">
+                          Diferencias con Seguridad Social ({resultadoActivo.sinMatchSS.length} en nómina sin planilla · {resultadoActivo.soloEnSS.length} en planilla sin nómina)
+                        </summary>
+                        <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-5">
+                          <div className="space-y-2">
+                            <p className="font-bold text-slate-600">En nómina, pero no en Seguridad Social</p>
+                            {resultadoActivo.sinMatchSS.length === 0 ? (
+                              <p className="text-slate-400">Ninguno.</p>
+                            ) : (
+                              <div className="max-h-56 overflow-y-auto rounded-lg border border-slate-200">
+                                <table className="w-full text-left">
+                                  <thead className="bg-slate-100/70 text-[10px] uppercase text-slate-500 sticky top-0">
+                                    <tr>
+                                      <th className="py-2 px-3">Documento</th>
+                                      <th className="py-2 px-3">Empleado</th>
+                                      <th className="py-2 px-3">Ingreso</th>
+                                      <th className="py-2 px-3">Retiro</th>
+                                      <th className="py-2 px-3">Posible causa</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100">
+                                    {resultadoActivo.sinMatchSS.map((e) => (
+                                      <tr key={e.documento}>
+                                        <td className="py-2 px-3 font-mono text-slate-500">{e.documentoOriginal || e.documento}</td>
+                                        <td className="py-2 px-3 font-semibold text-slate-800">{e.nombre}</td>
+                                        <td className="py-2 px-3">{formatFecha(e.fechaIngreso) || "—"}</td>
+                                        <td className="py-2 px-3">{formatFecha(e.fechaRetiro) || "—"}</td>
+                                        <td className="py-2 px-3 text-amber-700">{e.novedad || "Revisar"}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                          <div className="space-y-2">
+                            <p className="font-bold text-slate-600">En Seguridad Social, pero no en nómina</p>
+                            {resultadoActivo.soloEnSS.length === 0 ? (
+                              <p className="text-slate-400">Ninguno.</p>
+                            ) : (
+                              <div className="max-h-56 overflow-y-auto rounded-lg border border-slate-200">
+                                <table className="w-full text-left">
+                                  <thead className="bg-slate-100/70 text-[10px] uppercase text-slate-500 sticky top-0">
+                                    <tr>
+                                      <th className="py-2 px-3">Documento</th>
+                                      <th className="py-2 px-3">Nota</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100">
+                                    {resultadoActivo.soloEnSS.map((e) => (
+                                      <tr key={e.documento}>
+                                        <td className="py-2 px-3 font-mono text-slate-500">{e.documento}</td>
+                                        <td className="py-2 px-3 text-amber-700">{e.nota || "No aparece en la nómina de este mes."}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </details>
+                    )}
+
+                    <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-100/70 text-slate-500 uppercase text-[10px] font-extrabold tracking-wider border-b border-slate-200 sticky top-0">
+                          <tr>
+                            <th className="py-3 px-4">Documento</th>
+                            <th className="py-3 px-4">Empleado</th>
+                            <th className="py-3 px-4">Cargo (original)</th>
+                            <th className="py-3 px-4">Cargo (español)</th>
+                            <th className="py-3 px-4">Proporción mes</th>
+                            <th className="py-3 px-4">CNO</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 text-slate-700">
+                          {resultadoActivo.empleados.map((emp) => {
+                            const h = homologacion[emp.cargoKey];
+                            return (
+                              <tr key={emp.documento} className="hover:bg-slate-50/80 transition-colors">
+                                <td className="py-3 px-4 font-mono text-slate-500">
+                                  {emp.documentoOriginal || emp.documento}
+                                  {emp.agregadoDesdeSS && <span className="ml-1 text-[9px] text-blue-600 font-bold" title={emp.novedad}>SS</span>}
+                                </td>
+                                <td className="py-3 px-4 font-bold text-slate-900">{emp.nombre}</td>
+                                <td className="py-3 px-4 text-slate-400">{emp.cargo}</td>
+                                <td className="py-3 px-4 text-slate-700 font-medium">{h?.es || emp.cargo}</td>
+                                <td className="py-3 px-4 font-semibold">
+                                  {emp.trabajoCompleto ? (
+                                    <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/50">
+                                      <CheckCircle2 className="w-3 h-3" /> Completo
+                                    </span>
+                                  ) : (
+                                    <span
+                                      title={emp.novedad}
+                                      className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200/50"
+                                    >
+                                      {emp.proporcion.toFixed(2)}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-3 px-4">
+                                  {h?.codigo ? (
+                                    <span className={`font-mono font-bold ${h.confirmado ? "text-[#003B7A]" : "text-amber-700"}`}>{h.codigo}</span>
+                                  ) : (
+                                    <span className="text-slate-400">Sin código</span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex justify-end pt-2">
+                  <button
+                    onClick={exportarMatrizCompleta}
+                    disabled={exportando}
+                    className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-xs font-bold px-6 py-3.5 rounded-xl transition shadow-md hover:shadow-lg disabled:shadow-none flex items-center gap-2 cursor-pointer"
+                  >
+                    <Download className="w-4 h-4" /> {exportando ? "Generando Excel..." : "Exportar Matriz SENA completa (.xlsx)"}
+                  </button>
+                </div>
+              </section>
+            </>
+          )}
+        </div>
       </main>
     </div>
   );
