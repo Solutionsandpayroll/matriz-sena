@@ -1,46 +1,38 @@
-const API_URL = import.meta.env?.VITE_API_URL || "http://localhost:3001";
+import { collection, doc, getDoc, getDocs, setDoc, deleteDoc } from "firebase/firestore";
+import { db } from "../firebase";
 
-async function manejarRespuesta(response, accion) {
-  if (!response.ok) {
-    let detalle = "";
-    try {
-      const data = await response.json();
-      detalle = data?.error || "";
-    } catch {
-      // sin cuerpo JSON, se ignora
-    }
-    throw new Error(`Error al ${accion} (${response.status})${detalle ? ": " + detalle : ""}`);
-  }
-  return response.json();
-}
+const COLECCION = "empresasSena";
+// El id del documento no puede tener "/", y así "CIPY" y "cipy " son la misma empresa
+const idDeEmpresa = (nombre) => nombre.trim().toLowerCase().replace(/\//g, "-");
 
-// Devuelve la lista de empresas guardadas: [{ nombre, actualizadoEn }, ...]
 export async function listarEmpresasApi() {
-  const res = await fetch(`${API_URL}/api/empresas`);
-  return manejarRespuesta(res, "listar empresas");
+  const snap = await getDocs(collection(db, COLECCION));
+  return snap.docs
+    .map((d) => ({ nombre: d.data().nombre, actualizadoEn: d.data().actualizadoEn }))
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
 }
 
-// Devuelve la configuración completa de una empresa, o null si nunca se ha guardado.
 export async function cargarEmpresaApi(nombre) {
-  const res = await fetch(`${API_URL}/api/empresas/${encodeURIComponent(nombre)}`);
-  if (res.status === 404) return null;
-  return manejarRespuesta(res, "cargar la empresa");
+  const snap = await getDoc(doc(db, COLECCION, idDeEmpresa(nombre)));
+  if (!snap.exists()) return null; // empresa nueva
+  const { nombre: _n, actualizadoEn: _a, ...config } = snap.data();
+  return config;
 }
 
-// Guarda/actualiza (merge) una parte de la configuración de una empresa.
 export async function guardarEmpresaApi(nombre, cambios) {
-  const res = await fetch(`${API_URL}/api/empresas/${encodeURIComponent(nombre)}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cambios),
-  });
-  return manejarRespuesta(res, "guardar la empresa");
+  // Firestore no acepta "undefined"; esto lo limpia
+  const limpio = JSON.parse(JSON.stringify(cambios));
+  const ahora = new Date().toISOString();
+  await setDoc(
+    doc(db, COLECCION, idDeEmpresa(nombre)),
+    { ...limpio, nombre: nombre.trim(), actualizadoEn: ahora },
+    // mergeFields reemplaza cada campo completo (igual que tu server.js), no lo mezcla por dentro
+    { mergeFields: [...Object.keys(limpio), "nombre", "actualizadoEn"] }
+  );
+  return { ok: true, actualizadoEn: ahora };
 }
 
-// Elimina una empresa y toda su configuración guardada.
 export async function eliminarEmpresaApi(nombre) {
-  const res = await fetch(`${API_URL}/api/empresas/${encodeURIComponent(nombre)}`, {
-    method: "DELETE",
-  });
-  return manejarRespuesta(res, "eliminar la empresa");
+  await deleteDoc(doc(db, COLECCION, idDeEmpresa(nombre)));
+  return { ok: true };
 }
